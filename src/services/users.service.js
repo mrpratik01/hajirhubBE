@@ -56,8 +56,32 @@ async function upsertUserProfile(userId, patch) {
   return data;
 }
 
+/**
+ * Paginated list (admin client). Optional org_id filter.
+ */
+async function listUsers({ limit = 50, offset = 0, orgId } = {}) {
+  const safeLimit = Math.min(100, Math.max(1, Number(limit) || 50));
+  const safeOffset = Math.max(0, Number(offset) || 0);
+  const end = safeOffset + safeLimit - 1;
+
+  let q = supabaseAdmin
+    .from("users")
+    .select("*", { count: "exact" })
+    .order("created_at", { ascending: false })
+    .range(safeOffset, end);
+
+  if (orgId) {
+    q = q.eq("org_id", orgId);
+  }
+
+  const { data, error, count } = await q;
+  if (error) throw error;
+  return { data: data ?? [], count: count ?? null };
+}
+
 module.exports = {
   pickProfilePatch,
   getUserRowById,
   upsertUserProfile,
+  listUsers,
 };

@@ -39,4 +39,25 @@ async function putMe(req, res) {
   }
 }
 
-module.exports = { getMe, putMe };
+async function listAll(req, res) {
+  try {
+    const limit = req.query.limit;
+    const offset = req.query.offset;
+    const orgId = typeof req.query.org_id === "string" && req.query.org_id.length > 0 ? req.query.org_id : undefined;
+    const { data, count } = await usersService.listUsers({
+      limit,
+      offset,
+      orgId,
+    });
+    return res.json({
+      data,
+      count,
+      limit: Math.min(100, Math.max(1, Number(limit) || 50)),
+      offset: Math.max(0, Number(offset) || 0),
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to list users" });
+  }
+}
+
+module.exports = { getMe, putMe, listAll };
