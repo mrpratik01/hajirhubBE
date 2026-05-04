@@ -1,28 +1,61 @@
-# Dependencies
+# ─── Dependencies ────────────────────────────────────────────────────────────
 node_modules/
+
+# ─── Build output ─────────────────────────────────────────────────────────────
 /dist
 /build
 
-# Environment variables
+# ─── Environment variables ────────────────────────────────────────────────────
+# Never commit real secrets. Copy .env.example → .env and fill in values.
 .env
 .env.local
+.env.development
 .env.development.local
+.env.test
 .env.test.local
+.env.production
 .env.production.local
+.env.staging
 
-# Debug logs
+# ─── Logs ─────────────────────────────────────────────────────────────────────
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
 logs/
 *.log
 
-# Editor settings
+# ─── Editor & IDE ─────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
+*.suo
+.project
+.classpath
 
-# OS files
+# ─── OS files ─────────────────────────────────────────────────────────────────
 .DS_Store
+.DS_Store?
+._*
 Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ─── Test & coverage ──────────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+*.lcov
+
+# ─── Uploads & local storage ──────────────────────────────────────────────────
+uploads/
+tmp/
+temp/
+
+# ─── Package manager locks (keep package-lock.json, ignore others) ────────────
+yarn.lock
+pnpm-lock.yaml
+
+# ─── Supabase local dev ───────────────────────────────────────────────────────
+supabase/.branches
+supabase/.temp

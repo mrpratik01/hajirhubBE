@@ -1,5 +1,13 @@
 const express = require("express");
 const usersRoutes = require("./routes/users.routes");
+const adminPlansRoutes = require("./routes/admin.plans.routes");
+const organizationsRoutes = require("./routes/organizations.routes");
+const adminOrganizationsRoutes = require("./routes/admin.organizations.routes");
+const adminSubscriptionsRoutes = require("./routes/admin.subscriptions.routes");
+const departmentsRoutes = require("./routes/departments.routes");
+const shiftsRoutes = require("./routes/shifts.routes");
+const workplacesRoutes = require("./routes/workplaces.routes");
+const employeesRoutes = require("./routes/employees.routes");
 
 function createApp() {
   const app = express();
@@ -24,6 +32,14 @@ function createApp() {
   });
 
   app.use("/api/users", usersRoutes);
+  app.use("/api/admin/plans", adminPlansRoutes);
+  app.use("/api/organizations", organizationsRoutes);
+  app.use("/api/admin/organizations", adminOrganizationsRoutes);
+  app.use("/api/admin/subscriptions", adminSubscriptionsRoutes);
+  app.use("/api/departments", departmentsRoutes);
+  app.use("/api/shifts", shiftsRoutes);
+  app.use("/api/workplaces", workplacesRoutes);
+  app.use("/api/employees", employeesRoutes);
 
   app.use((req, res) => {
     res.status(404).json({ error: "Not found" });

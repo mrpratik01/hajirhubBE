@@ -106,6 +106,16 @@ async function main() {
     console.log(JSON.stringify(rList.json, null, 2));
   }
 
+  const rPlans = await request("GET", "/api/admin/plans", { token });
+  if (rPlans.status === 200 && Array.isArray(rPlans.json?.data)) {
+    label("GET /api/admin/plans (200, super_admin|owner)", true);
+  } else if (rPlans.status === 403) {
+    label("GET /api/admin/plans (403 — need owner or super_admin)", true);
+  } else {
+    label(`GET /api/admin/plans (${rPlans.status})`, false);
+    console.log(JSON.stringify(rPlans.json, null, 2));
+  }
+
   const r404 = await request("GET", "/api/nope", { token });
   label("GET unknown (404)", r404.status === 404);
 

@@ -1,0 +1,32 @@
+# Completed Tasks - HajirHub Backend Development
+# Date: 2026-05-03
+
+1. EMAIL RATE LIMIT RESOLUTION
+- Investigated 'over_email_send_rate_limit' error.
+- Identified Supabase Auth server-side limits as the root cause.
+- Provided guidance on increasing limits in Supabase Dashboard and setting up custom SMTP.
+
+2. PORT & ENVIRONMENT CONFIGURATION
+- Updated backend to run on port 3001.
+- Configured .env file with appropriate PORT and Supabase credentials.
+- Created .env.example for team collaboration and safe credential management.
+
+3. DEVELOPMENT WORKFLOW IMPROVEMENTS
+- Implemented 'nodemon' for automatic server restarts during development.
+- Added "npm run dev" script to package.json.
+- Created a comprehensive .gitignore to prevent sensitive data (like .env) and node_modules from being pushed to Git.
+
+4. USER API ENHANCEMENTS
+- Implemented 'getAllUsers' (listAll) functionality in users.service.js and users.controller.js.
+- Exposed GET /api/users endpoint for staff/admin users.
+- Provided Postman testing instructions for PUT /me (user sync/upsert) and profile retrieval.
+
+5. ADMIN PLAN MANAGEMENT FIXES
+- Diagnosed issue where PUT /api/admin/plans/:id was returning 200 OK but not updating values.
+- Identified hardcoded/missing fields in plans.service.js as the cause.
+- Rewrote plan update/create logic to dynamically handle all schema fields (max_employees, max_workplaces, max_admin_users, trial_days, and all feature flags).
+- Verified database connectivity using Supabase agent skills.
+
+6. PROJECT STRUCTURE & DOCUMENTATION
+- Provided full project file tree documentation.
+- Verified Supabase connectivity and confirmed existing data count.

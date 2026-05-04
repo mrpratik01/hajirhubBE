@@ -7,7 +7,6 @@ const router = express.Router();
 
 router.use(requireSupabaseUser);
 
-router.get("/", usersController.listAll);
 router.get("/me", usersController.getMe);
 router.put("/me", usersController.putMe);
 

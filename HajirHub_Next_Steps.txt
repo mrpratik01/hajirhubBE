@@ -1,0 +1,468 @@
+================================================================================
+HAJIRHUB BACKEND — NEXT STEPS PLAN
+Date: 2026-05-03
+Status: Post-foundation. Auth done, users done, plans done.
+Goal: Get frontend unblocked. Build in this exact order.
+================================================================================
+
+IMPORTANT RULES FOR THIS PHASE
+────────────────────────────────
+- Subscriptions: hardcode status = 'active', plan = 'pro' for all test orgs. No real billing.
+- Hardware (ZKTeco/Hikvision): skip. Stub the endpoints, return mock data.
+- Face biometric on mobile: DO NOT store raw selfie for face matching. See Section F below.
+- Every endpoint must return the standard envelope: { success, data, meta } or { success, error }
+- Always scope every DB query with org_id first. Never trust client-sent org_id — read it from req.user.
+
+
+================================================================================
+SECTION A — ORGANIZATION SETUP (Build This First)
+================================================================================
+Frontend is completely blocked without this. Owner must have an org before anything else.
+
+ENDPOINTS TO BUILD:
+  POST   /api/organizations                → create org, auto-create subscription (status=active, plan=pro for now)
+  GET    /api/organizations/me             → get own org details
+  PUT    /api/organizations/me             → update org (name, PAN, address, logo)
+  POST   /api/organizations/me/logo        → upload logo to Supabase Storage, return URL
+
+SIDE EFFECTS on org create:
+  - Insert into subscriptions (org_id, plan_id=pro, status=active)
+  - Insert into notification_settings (org_id) — trigger already does this
+  - Insert into employee_sequences (org_id, last_seq=0) — trigger already does this
+
+WHAT FRONTEND NEEDS FROM THIS:
+  - Onboarding flow: create org → set workplace → add first employee → done
+  - org.name, org.logo_url, org.pan_no shown in dashboard header
+
+
+================================================================================
+SECTION B — DEPARTMENTS & SHIFTS (Build Second — 1 Day)
+================================================================================
+Needed before employee creation. Simple CRUD.
+
+ENDPOINTS:
+  GET    /api/departments                  → list for org
+  POST   /api/departments                  → create
+  PUT    /api/departments/:id              → update
+  DELETE /api/departments/:id              → soft delete (is_active = false)
+
+  GET    /api/shifts                       → list for org
+  POST   /api/shifts                       → create (name, start_time, end_time, working_days bitmask)
+  PUT    /api/shifts/:id                   → update
+  DELETE /api/shifts/:id                   → soft delete
+
+SEED DEFAULTS on org create (do this in org create side effect):
+  - Department: "General"
+  - Shift: "Day Shift" 09:00–17:00, working_days=62 (Mon–Fri)
+
+
+================================================================================
+SECTION C — WORKPLACE & GEOFENCE (Build Third — 1 Day)
+================================================================================
+Needed before attendance. Mobile app needs workplace GPS to show the geofence map.
+
+ENDPOINTS:
+  GET    /api/workplaces                   → list all for org
+  POST   /api/workplaces                   → create with lat, lng, radius_meters
+  GET    /api/workplaces/:id               → single workplace
+  PUT    /api/workplaces/:id/geofence      → update lat, lng, radius_meters only
+  PUT    /api/workplaces/:id               → update name, address etc
+
+  GET    /api/workplaces/:id/qr-token      → get active QR token (generate if none)
+  POST   /api/workplaces/:id/rotate-qr    → rotate QR token manually
+
+GEOFENCE LOGIC (put in utils/haversine.js — already planned):
+  function haversineDistanceM(lat1, lng1, lat2, lng2)
+  Returns distance in metres. Used in attendance checkin validation.
+
+
+================================================================================
+SECTION D — EMPLOYEE MANAGEMENT (Build Fourth — 2 Days)
+================================================================================
+Core of the system. Frontend needs full CRUD before building any attendance screen.
+
+ENDPOINTS:
+  GET    /api/employees                    → list (paginated, search by name, filter by dept/status)
+  POST   /api/employees                    → create employee
+  GET    /api/employees/:id                → profile
+  PUT    /api/employees/:id                → update profile/salary
+  PUT    /api/employees/:id/deactivate     → soft delete (status = inactive)
+  GET    /api/employees/me                 → own profile (employee role)
+  POST   /api/employees/:id/photo          → upload photo to Supabase Storage
+
+ON CREATE SIDE EFFECTS:
+  - Call fn_next_employee_code(org_id) → get HH-001 format code
+  - Create leave_balances rows for all active leave_types for current BS year
+  - Create users row if phone not already in auth (send SMS invite via Sparrow)
+  - Write to audit_logs: { action: 'employee.created' }
+
+QUERY PARAMS FOR LIST:
+  ?search=ram                             → trigram search on full_name
+  ?department_id=uuid
+  ?status=active|inactive
+  ?page=1&limit=20
+
+SALARY REVISION:
+  PUT /api/employees/:id/salary           → update basic_salary + write to salary_revisions table
+
+
+================================================================================
+SECTION E — ATTENDANCE (Build Fifth — 3 Days — Most Complex)
+================================================================================
+
+E1. MOBILE CHECK-IN (selfie + GPS)
+────────────────────────────────────
+POST /api/attendance/checkin
+  Body: multipart/form-data
+    - selfie: image file (max 300KB, frontend compresses)
+    - lat: float
+    - lng: float
+    - accuracy_m: float
+    - client_record_id: uuid (for dedup)
+
+  Server logic (in order):
+    1. Check no existing check-in for employee today (date_bs). Return 409 if duplicate.
+    2. Haversine distance check vs workplace. If > radius AND no override: return 422 OUTSIDE_GEOFENCE.
+    3. If override: verify geofence_override_pin_hash (bcrypt compare).
+    4. Upload selfie → Supabase Storage: selfies/{org_id}/{employee_id}/{date_ad}.jpg
+       DO NOT store full selfie for face matching. See Section F.
+    5. Determine status: present / late / half_day using shift start + org.late_grace_minutes.
+    6. Insert attendance row (source = 'mobile').
+    7. Return { attendanceId, status, checkInTime, selfieUrl }.
+
+POST /api/attendance/checkout
+  Body: { lat, lng }
+  Logic: find today's attendance, set check_out_time, calculate working_minutes.
+
+E2. QR CHECK-IN
+────────────────
+POST /api/attendance/qr-checkin
+  Body: multipart/form-data { token, selfie, lat, lng }
+  Logic:
+    1. Validate token exists in qr_tokens, is_active=true, not expired, matches org.
+    2. Selfie still required (upload same way).
+    3. Geofence skipped (geofence_status = 'qr'). Source = 'qr'.
+    4. Same status logic as mobile check-in.
+    5. Increment qr_tokens.use_count.
+
+E3. OFFLINE SYNC
+─────────────────
+POST /api/attendance/sync
+  Body: { records: [ { client_record_id, type, lat, lng, selfieBase64, offline_timestamp } ] }
+  Logic per record:
+    1. Check offline_sync_log for client_record_id. Skip if duplicate.
+    2. Reject if offline_timestamp > 24h old. Return { accepted: false, requiresOwnerApproval: true }.
+    3. Upload selfie from base64.
+    4. Process same as checkin/checkout.
+    5. Write to offline_sync_log with result.
+  Return: [ { client_record_id, success, attendanceId, error } ]
+
+E4. READ ENDPOINTS
+───────────────────
+GET /api/attendance/today                  → all employees for org today (for owner/hr dashboard)
+GET /api/attendance/monthly?month=2082-08  → monthly summary per employee
+GET /api/attendance/employee/:id           → history for one employee
+PUT /api/attendance/:id/manual             → manual correction (owner only) + audit log
+
+E5. OFFLINE APPROVAL (for records > 24h)
+─────────────────────────────────────────
+GET  /api/attendance/offline/pending       → list records awaiting owner approval
+PUT  /api/attendance/offline/:logId/approve → owner approves, record gets processed
+PUT  /api/attendance/offline/:logId/reject  → owner rejects with reason
+
+
+================================================================================
+SECTION F — FACE BIOMETRIC — HOW TO DO IT CORRECTLY
+================================================================================
+
+THE PROBLEM WITH NAIVE APPROACH:
+  Storing full selfie JPGs and comparing them is:
+  - Slow (image-to-image comparison)
+  - Storage-heavy
+  - Not how any real time-attendance system works
+  - Privacy risk (storing biometric photos)
+
+HOW MODERN SYSTEMS DO IT (ZKTeco, Hikvision, Suprema, Fingertec):
+  They do NOT store the face photo. They store a FACE EMBEDDING (also called face template).
+  A face embedding is a float vector (typically 128 or 512 numbers) that represents
+  the geometric distances between facial landmarks. It is a mathematical fingerprint,
+  not a reconstructable photo. You cannot reverse a face embedding back to a face.
+
+  Verification: compare cosine similarity between stored embedding and live embedding.
+  Threshold: typically 0.6–0.75 cosine similarity = same person.
+
+YOUR ARCHITECTURE FOR HAJIR HUB:
+  You have two separate attendance modes. Handle them differently.
+
+  MODE 1 — HARDWARE BIOMETRIC (ZKTeco/Hikvision):
+    The device handles everything. The device stores the face embedding internally.
+    You NEVER receive or store any face data. The device sends you:
+      { device_user_id, punch_time, verification_mode: 'face' }
+    Your backend just receives this event and maps device_user_id → employee.
+    No face storage needed at all. This is the correct approach.
+    Build this after MVP. Stub now.
+
+  MODE 2 — MOBILE SELFIE (your current MVP path):
+    This is NOT face recognition. This is face PRESENCE proof.
+    You are not verifying "is this the same person as enrolled".
+    You are verifying "a real human face was present at check-in time + GPS location".
+    This is called Liveness Detection, not Face Recognition.
+
+    FOR MVP: store the selfie. Use it for manual audit only (owner can view it).
+    The selfie proves the employee was physically present. The GPS proves location.
+    This is exactly what Slack, Keka, Darwinbox and most SMB HR apps do for mobile.
+
+    FOR LATER (PHASE 2): add face recognition on mobile using:
+      Option A — On-device ML (recommended):
+        Use @tensorflow/tfjs + blazeface (runs on phone, no server cost)
+        Or use Expo + react-native-vision-camera + face-detector
+        On enrollment: generate face embedding on device → send only the float vector to backend
+        On check-in: generate embedding on device → compare vs stored embedding on backend
+        Storage: store embedding as float[] in employees.face_embedding (jsonb column)
+        You store: 128 floats (≈ 1KB) per employee. Not a photo.
+
+      Option B — Cloud API (simpler but costs money + latency):
+        AWS Rekognition or Azure Face API
+        Send selfie → get embedding → compare → delete photo server-side
+        Cost: ~$0.001 per recognition. Fine for Nepal SMB scale.
+
+  WHAT TO BUILD NOW FOR MVP:
+    - Store selfie in Supabase Storage (already planned). Fine for MVP.
+    - Add a face_embedding JSONB column to employees table (null for now).
+    - When you implement face recognition later, populate this column on employee enrollment.
+    - No other changes needed. Schema is already future-ready.
+
+  FINGERPRINT (for hardware):
+    Same principle. The device stores the fingerprint template (not an image).
+    It sends you only { device_user_id, punch_time, verification_mode: 'finger' }.
+    You never touch fingerprint data.
+
+SUMMARY TABLE:
+  Mode              | Store on backend        | Privacy risk | MVP?
+  ─────────────────────────────────────────────────────────────────
+  Hardware biometric| Nothing (device handles)| None         | Stub
+  Mobile selfie     | JPEG (audit proof only) | Low          | Yes
+  Mobile face recog | Float vector (128 nums) | Very low     | Phase 2
+  Fingerprint       | Nothing (device handles)| None         | Stub
+
+
+================================================================================
+SECTION G — LEAVE MANAGEMENT (Build Sixth — 1.5 Days)
+================================================================================
+
+ENDPOINTS:
+  POST   /api/leaves/apply                 → employee submits leave request
+  GET    /api/leaves                       → list all (owner/hr) with filters
+  GET    /api/leaves/my                    → own requests (employee)
+  PUT    /api/leaves/:id/approve           → owner/hr_manager approves
+  PUT    /api/leaves/:id/reject            → owner/hr_manager rejects with reason
+  PUT    /api/leaves/:id/cancel            → employee cancels own pending request
+  GET    /api/leaves/balances/:empId       → leave balance per type for employee
+  GET    /api/leaves/balances/my           → own balances (employee)
+  GET    /api/leaves/calendar?month=X      → all employees leave calendar view
+
+LEAVE TYPES SEED (do this on org create):
+  Annual Leave      18 days
+  Sick Leave        12 days
+  Maternity Leave   98 days  (female only)
+  Paternity Leave   15 days  (male only)
+  Mourning Leave    13 days
+  Unpaid Leave      0 days (unlimited)
+  Public Holiday    0 days (auto from public_holidays table)
+
+ON APPROVAL SIDE EFFECT:
+  - Deduct from leave_balances (trigger already handles this)
+  - Set attendance.status = 'leave' for each approved day
+  - Send push notification to employee
+
+
+================================================================================
+SECTION H — NOTIFICATION SETUP (Build Seventh — 1 Day)
+================================================================================
+Do this as a service, not endpoint. Called internally by other services.
+
+BUILD notification.service.js WITH:
+  sendWhatsApp(phone, message)    → Twilio WhatsApp API
+  sendSMS(phone, message)         → Sparrow SMS (Nepal, cheaper for OTP)
+  sendPush(expoToken, title, body) → Expo Push Notification API (free)
+
+  notify(orgId, employeeId, type, data) → master function, picks channel from notification_settings
+
+NOTIFICATION EVENTS TO WIRE UP:
+  - Leave approved/rejected    → push to employee
+  - Payslip ready              → push to employee
+  - New employee invite        → SMS to employee phone
+  - Device offline alert       → WhatsApp to owner (stub for now)
+
+MORNING REPORT (Supabase Edge Function):
+  - Schedule: 10:30 AM NPT = 04:45 UTC cron
+  - Query today's attendance, group by status
+  - Send WhatsApp/SMS to owner's notification number
+  - Skip if zero employees configured
+  - Build this as Supabase Edge Function (Deno), not in Node.js
+
+
+================================================================================
+SECTION I — PAYROLL ENGINE (Build Eighth — 3 Days)
+================================================================================
+
+I1. CONFIG & SLABS (already seeded in schema — just expose read endpoint)
+  GET /api/payroll/config                  → get org payroll config
+  GET /api/payroll/tds-slabs?year=2082     → get slabs for year
+
+I2. CALCULATION ENGINE (pure functions in services/payroll.service.js):
+  calculateSSF(basicSalary, enrolled)
+    → { employeeContribution, employerContribution }
+
+  calculateTDS(monthlyGross, ssfContribution, maritalStatus, bsYear)
+    → { monthlyTDS, annualTaxableIncome, slabApplied }
+    Logic: annualGross = monthlyGross * 12, apply progressive slabs from tds_slabs table
+
+  calculateNetSalary(employee, attendanceSummary, advances, bsYear)
+    → full payroll item object with all line items
+
+I3. RUN PAYROLL:
+  POST /api/payroll/run
+    Body: { month_bs: '2082-08' }
+    Logic:
+      1. Check no finalized payroll for this month (reject if exists).
+      2. For each active employee: calculateNetSalary.
+      3. Insert payroll_runs (status = draft) + all payroll_items.
+      4. Return summary totals.
+
+  GET  /api/payroll/:month                 → get draft/finalized payroll for month
+  POST /api/payroll/:id/finalize           → lock payroll (owner only), set status = finalized
+  GET  /api/payroll/:id/payslip/:empId     → get payslip data (PDF generation separate)
+
+I4. SALARY ADVANCES (Sapathi):
+  POST /api/advances                       → record advance
+  GET  /api/advances/:employeeId           → history
+  PUT  /api/advances/:id/repaid            → mark repaid in cash (not deducted)
+
+I5. FESTIVAL BONUS:
+  POST /api/payroll/festival-bonus/:bsYear → calculate Dashain bonus for all employees
+  PUT  /api/payroll/festival-bonus/:id/override → owner overrides individual amount
+  POST /api/payroll/festival-bonus/finalize → finalize all bonus payslips
+
+
+================================================================================
+SECTION J — REPORTS (Build Ninth — 1.5 Days)
+================================================================================
+
+GET /api/reports/ssf-csv?month=2082-08    → exact CSV for sosys.ssf.gov.np upload
+GET /api/reports/attendance-excel?month=X → Excel workbook (use exceljs)
+GET /api/reports/payroll-excel?month=X    → payroll register Excel
+GET /api/reports/tds-annual?year=2082&empId=X → annual TDS PDF
+GET /api/reports/advance-ledger?empId=X   → advance history Excel
+GET /api/reports/leave-balance?year=2082  → leave balance Excel
+
+ALL REPORTS:
+  - Validate org has feature enabled (check plan flags)
+  - Store export record in report_exports table
+  - Return file as download or signed URL from Supabase Storage
+  - Use exceljs for Excel, pdfkit or puppeteer for PDF
+
+
+================================================================================
+SECTION K — HARDWARE STUBS (Build Tenth — 0.5 Days)
+================================================================================
+Don't build real hardware integration now. Build stubs that return mock data.
+This unblocks frontend hardware management screens.
+
+STUB ENDPOINTS (return hardcoded/empty data):
+  GET    /api/hardware/devices              → return []
+  POST   /api/hardware/devices             → return { id: uuid, ...body, is_online: false }
+  PUT    /api/hardware/devices/:id         → return updated mock
+  POST   /api/hardware/devices/:id/test    → return { is_online: false, message: 'Hardware integration coming soon' }
+  POST   /api/hardware/devices/:id/sync    → return { synced: 0 }
+  POST   /api/hardware/hikvision/event     → return 200 OK (log to console only)
+
+REAL HARDWARE — WHEN YOU ARE READY:
+  ZKTeco:  npm install zklib. Poll loop in workers/biometric.worker.js.
+  Hikvision: ISAPI webhook. Register webhook on device pointing to your /api/hardware/hikvision/event.
+  Both write to biometric_raw_logs → rawLogProcessor.js normalizes to attendance table.
+  Test with ONE real device before writing any production code.
+  Get the exact model from pilot shop. Different ZKTeco models have different SDK behavior.
+
+
+================================================================================
+BUILD ORDER SUMMARY
+================================================================================
+
+WEEK 1 (Days 1–7):
+  Day 1–2  → Section A: Organization setup + Section B: Departments & Shifts
+  Day 3    → Section C: Workplace & Geofence
+  Day 4–5  → Section D: Employee CRUD (full)
+  Day 6–7  → Section E: Attendance (checkin, checkout, offline sync, read endpoints)
+
+  → After Day 7: Frontend can build login, dashboard, employee list, check-in screen in parallel.
+
+WEEK 2 (Days 8–14):
+  Day 8–9  → Section G: Leave Management
+  Day 10   → Section H: Notifications (service layer + morning report edge function)
+  Day 11–13 → Section I: Payroll Engine
+  Day 14   → Section J: Reports + Section K: Hardware stubs
+
+  → After Day 14: Feature-complete MVP backend. Frontend finishes remaining screens.
+
+WEEK 3 (Days 15–21):
+  - Bug fixes from frontend integration
+  - QR code generation and print flow
+  - Postman collection cleanup and documentation
+  - Staging deployment on Railway/Render
+  - CORS config for web domain + Expo Go
+  - First beta test with 1 real shop in Kathmandu
+
+
+================================================================================
+THINGS TO DO IN PARALLEL (non-blocking, do when you have time)
+================================================================================
+- Supabase Storage bucket policies: confirm selfies bucket is private, logos is public
+- Add expo_push_token update endpoint: PUT /api/users/me/push-token
+- Seed Nepal public holidays for BS 2082 into public_holidays table
+- Write .env.example with all required keys so frontend dev can set up fast
+- Set CORS in app.js: allow web origin (localhost:3000 + your Vercel URL) + expo
+
+
+================================================================================
+SCHEMA ADDITIONS NEEDED (add these before building attendance)
+================================================================================
+-- Add face embedding column (null now, used in Phase 2)
+ALTER TABLE public.employees
+  ADD COLUMN IF NOT EXISTS face_embedding JSONB;
+  -- Will store: { model: 'blazeface', version: 1, vector: [0.12, -0.34, ...128 floats] }
+
+-- Add index for offline sync dedup (if not already there)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_offline_dedup
+  ON public.offline_sync_log(employee_id, client_record_id);
+
+
+================================================================================
+WHAT YOU ARE NOT BUILDING YET (explicitly deferred)
+================================================================================
+- Real Stripe/eSewa/Khalti billing (use hardcoded active+pro subscription)
+- Real ZKTeco/Hikvision SDK integration (stub endpoints only)
+- Face recognition on mobile (store selfie only, face_embedding column empty)
+- Annual TDS 87K form (complex PDF, defer to after payroll is working)
+- Super admin web panel (build after product is stable)
+- Multi-branch enterprise features (single workplace per org for now)
+- WhatsApp/SMS in production (use console.log in dev, real API key before beta)
+
+
+================================================================================
+PACKAGES TO INSTALL NOW (if not already)
+================================================================================
+npm install multer                   # file upload (selfies)
+npm install bcrypt                   # PIN hashing
+npm install exceljs                  # Excel report generation
+npm install pdfkit                   # Payslip PDF
+npm install nepal-date-converter     # BS <-> AD date conversion
+npm install node-cron                # for any scheduled jobs in Node (optional)
+npm install express-rate-limit       # rate limiter middleware
+npm install helmet                   # security headers
+npm install morgan                   # HTTP request logging
+
+
+================================================================================
+END OF PLAN
+================================================================================
