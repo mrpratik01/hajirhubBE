@@ -54,13 +54,16 @@ async function list(req, res) {
 
 /**
  * POST /api/employees
- * Owner only: create a new employee.
+ * Owner only: create a new employee with auto-provisioned auth account.
+ * Returns employee data + credentials: { email, temporaryPassword }
  */
 async function create(req, res) {
   try {
-    const employee = await employeesService.createEmployee(req.user.id, req.body);
-    return res.status(201).json({ data: employee });
+    console.log("[create] called, body email:", req.body?.email, "keys:", Object.keys(req.body || {}));
+    const { employee, credentials } = await employeesService.createEmployee(req.user.id, req.body);
+    return res.status(201).json({ data: employee, credentials });
   } catch (err) {
+    if (err.code === "EMAIL_CONFLICT") return res.status(409).json({ error: err.message });
     return handleError(res, err, "Create employee");
   }
 }
@@ -185,6 +188,43 @@ async function invite(req, res) {
   }
 }
 
+// ─── Auth Provisioning ────────────────────────────────────────────────────────
+
+/**
+ * POST /api/employees/:id/provision-auth
+ * Owner only: provision auth account for an existing employee.
+ * Body: { email } (optional if employee already has email stored)
+ */
+async function provisionAuth(req, res) {
+  try {
+    const credentials = await employeesService.provisionExistingEmployee(
+      req.user.id,
+      req.params.id,
+      req.body.email ?? null
+    );
+    return res.status(201).json({ data: credentials });
+  } catch (err) {
+    if (err.code === "ALREADY_PROVISIONED") return res.status(409).json({ error: err.message });
+    if (err.code === "TERMINATED") return res.status(422).json({ error: err.message });
+    if (err.code === "EMAIL_CONFLICT") return res.status(409).json({ error: err.message });
+    return handleError(res, err, "Provision auth");
+  }
+}
+
+/**
+ * GET /api/employees/:id/credentials
+ * Owner + HR: retrieve stored credential info (email + active status).
+ * Plain-text password is NEVER returned.
+ */
+async function getCredentials(req, res) {
+  try {
+    const data = await employeesService.getEmployeeCredentials(req.user.id, req.params.id);
+    return res.json({ data });
+  } catch (err) {
+    return handleError(res, err, "Get credentials");
+  }
+}
+
 // ─── Photo ────────────────────────────────────────────────────────────────────
 
 /**
@@ -296,6 +336,7 @@ async function deleteDocument(req, res) {
 }
 
 module.exports = {
+  // Employee CRUD
   list,
   create,
   getMe,
@@ -306,6 +347,12 @@ module.exports = {
   assignShift,
   assignWorkplace,
   invite,
+  provisionAuth,
+  
+  // Credential Management
+  getCredentials,
+  
+  // Documents & Media
   uploadPhoto,
   listDocuments,
   uploadDocument,

@@ -1,8 +1,56 @@
 const { supabaseAdmin } = require("../config/supabase");
+const bcrypt = require("bcrypt");
+const crypto = require("crypto");
+const employeeCredentialsService = require("./employeeCredentials.service");
+
+// ─── Encryption helpers ───────────────────────────────────────────────────────
+// AES-256-GCM: symmetric encryption so the owner can retrieve the temp password.
+// The key lives in CREDENTIALS_ENCRYPTION_KEY env var — never in the DB.
+
+const ALGO = "aes-256-gcm";
+
+function getEncryptionKey() {
+  const hex = process.env.CREDENTIALS_ENCRYPTION_KEY;
+  if (!hex || hex.length !== 64) {
+    throw new Error("CREDENTIALS_ENCRYPTION_KEY must be a 64-char hex string in .env");
+  }
+  return Buffer.from(hex, "hex"); // 32 bytes
+}
+
+/**
+ * Encrypt a plain-text string.
+ * Returns "iv:authTag:ciphertext" — all hex-encoded, safe to store in TEXT column.
+ */
+function encryptPassword(plainText) {
+  const key = getEncryptionKey();
+  const iv = crypto.randomBytes(12); // 96-bit IV for GCM
+  const cipher = crypto.createCipheriv(ALGO, key, iv);
+  const encrypted = Buffer.concat([cipher.update(plainText, "utf8"), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return `${iv.toString("hex")}:${authTag.toString("hex")}:${encrypted.toString("hex")}`;
+}
+
+/**
+ * Decrypt a stored credential string back to plain text.
+ * Returns null if decryption fails (wrong key, tampered data).
+ */
+function decryptPassword(stored) {
+  try {
+    const key = getEncryptionKey();
+    const [ivHex, authTagHex, encryptedHex] = stored.split(":");
+    const iv = Buffer.from(ivHex, "hex");
+    const authTag = Buffer.from(authTagHex, "hex");
+    const encrypted = Buffer.from(encryptedHex, "hex");
+    const decipher = crypto.createDecipheriv(ALGO, key, iv);
+    decipher.setAuthTag(authTag);
+    return decipher.update(encrypted) + decipher.final("utf8");
+  } catch {
+    return null;
+  }
+}
 
 // ─── Field whitelists ─────────────────────────────────────────────────────────
 
-// Fields allowed on create (salary fields handled separately)
 const CREATE_FIELDS = new Set([
   "full_name", "full_name_nepali", "phone", "email",
   "gender", "date_of_birth_bs", "date_of_birth_ad",
@@ -15,7 +63,6 @@ const CREATE_FIELDS = new Set([
   "notes",
 ]);
 
-// Fields allowed on general profile update (excludes salary, status, codes)
 const UPDATE_FIELDS = new Set([
   "full_name", "full_name_nepali", "phone", "email",
   "gender", "date_of_birth_bs", "date_of_birth_ad",
@@ -27,7 +74,6 @@ const UPDATE_FIELDS = new Set([
   "notes",
 ]);
 
-// Salary-specific fields (only updated via /salary endpoint with revision log)
 const SALARY_FIELDS = new Set([
   "basic_salary", "hra", "travel_allowance", "medical_allowance",
 ]);
@@ -155,6 +201,269 @@ async function initializeLeaveBalances(orgId, employeeId, bsYear) {
   if (insertError) throw insertError;
 }
 
+// ─── Auth Provisioning ────────────────────────────────────────────────────────
+
+/**
+ * Generate a memorable temporary password.
+ * Pattern: Hajir@{last4digits}{rand1000-9999}
+ * Always 14 chars — well above Supabase's 6-char minimum.
+ */
+function generateTempPassword(phone) {
+  const digits = phone.replace(/\D/g, "");
+  const last4 = digits.slice(-4).padStart(4, "0");
+  const rand = Math.floor(Math.random() * 9000) + 1000;
+  return `Hajir@${last4}${rand}`;
+}
+
+/**
+ * Core provisioning function — shared by createEmployee and provisionExistingEmployee.
+ *
+ * Steps:
+ *  1. Generate temp password
+ *  2. Create Supabase Auth user (email_confirm: true)
+ *  3. Update public.users row (created by trigger) with org_id, role, employee_id, password_changed
+ *  4. Update employees.user_id + app_access_status = 'invited'
+ *  5. Store bcrypt-hashed credentials in employee_credentials
+ *  6. Rollback auth user on any failure
+ *
+ * Returns: { authUserId, email, temporaryPassword }
+ */
+async function provisionAuthAccount(employee, orgId, provisionedBy) {
+  const temporaryPassword = generateTempPassword(employee.phone);
+
+  // Step 1 — Create Supabase Auth user
+  const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
+    email: employee.email,
+    password: temporaryPassword,
+    email_confirm: true,
+    user_metadata: {
+      full_name: employee.full_name,
+      org_id: orgId,
+      role: "employee",
+    },
+  });
+
+  if (authError) {
+    // Duplicate email
+    if (
+      authError.message?.toLowerCase().includes("already") ||
+      authError.message?.toLowerCase().includes("duplicate") ||
+      authError.status === 422
+    ) {
+      const err = new Error("An account with this email already exists. Use a different email for this employee.");
+      err.code = "EMAIL_CONFLICT";
+      throw err;
+    }
+    console.error("[provision] auth_provision_failed", {
+      event: "auth_provision_failed",
+      employee_id: employee.id,
+      org_id: orgId,
+      error_code: authError.status,
+      error_message: authError.message,
+      timestamp: new Date().toISOString(),
+    });
+    throw new Error(`Auth account creation failed: ${authError.message}`);
+  }
+
+  const authUserId = authData.user.id;
+  console.log("[provision] auth user created:", authUserId);
+
+  // Rollback helper
+  const rollback = async () => {
+    const { error: delError } = await supabaseAdmin.auth.admin.deleteUser(authUserId);
+    if (delError) {
+      console.error("[provision] auth_provision_rollback_failed", {
+        event: "auth_provision_rollback_failed",
+        orphaned_auth_user_id: authUserId,
+        employee_id: employee.id,
+        org_id: orgId,
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      console.log("[provision] auth_provision_rollback", {
+        event: "auth_provision_rollback",
+        auth_user_id: authUserId,
+        rollback_success: true,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  };
+
+  // Step 2 — Wait for the DB trigger to create the public.users row
+  // fn_handle_new_auth_user fires on auth.users INSERT and creates the row
+  let retries = 5;
+  let userRowExists = false;
+  while (retries > 0) {
+    await new Promise((r) => setTimeout(r, 400));
+    const { data: check } = await supabaseAdmin
+      .from("users")
+      .select("id")
+      .eq("id", authUserId)
+      .maybeSingle();
+    if (check) { userRowExists = true; break; }
+    retries--;
+    console.log(`[provision] waiting for users row... retries left: ${retries}`);
+  }
+
+  if (!userRowExists) {
+    // Trigger didn't fire — insert the row manually
+    console.log("[provision] trigger did not fire, inserting users row manually");
+    const { error: insertUserError } = await supabaseAdmin
+      .from("users")
+      .insert({
+        id: authUserId,
+        full_name: employee.full_name,
+        email: employee.email,
+        org_id: orgId,
+        employee_id: employee.id ?? null,
+        password_changed: false,
+      });
+
+    if (insertUserError && insertUserError.code !== "23505") {
+      // 23505 = already exists (race condition), safe to ignore
+      await rollback();
+      throw new Error(`Failed to create user profile: ${insertUserError.message}`);
+    }
+  } else {
+    // Row exists — update it with org context
+    // Use raw SQL cast to avoid enum type issues with the role column
+    const { error: userUpdateError } = await supabaseAdmin
+      .from("users")
+      .update({
+        org_id: orgId,
+        employee_id: employee.id ?? null,
+        password_changed: false,
+        full_name: employee.full_name,
+        email: employee.email,
+      })
+      .eq("id", authUserId);
+
+    if (userUpdateError) {
+      console.error("[provision] users update error:", userUpdateError.message);
+      await rollback();
+      throw new Error(`Failed to link user profile: ${userUpdateError.message}`);
+    }
+  }
+
+  // Step 3 — Update employees row (only if employee.id is known)
+  if (employee.id) {
+    const { error: empUpdateError } = await supabaseAdmin
+      .from("employees")
+      .update({ user_id: authUserId, app_access_status: "invited" })
+      .eq("id", employee.id)
+      .eq("org_id", orgId);
+
+    if (empUpdateError) {
+      await rollback();
+      throw new Error(`Failed to link employee record: ${empUpdateError.message}`);
+    }
+  }
+
+  // Step 4 — Store encrypted credentials for later retrieval (non-fatal)
+  try {
+    const encryptedPassword = encryptPassword(temporaryPassword);
+    await supabaseAdmin
+      .from("employee_credentials")
+      .insert({
+        org_id: orgId,
+        employee_id: employee.id ?? null,
+        email: employee.email,
+        password_hash: encryptedPassword, // AES-256-GCM encrypted, not bcrypt
+        is_active: true,
+        provisioned_by: provisionedBy ?? null,
+      });
+  } catch (credError) {
+    console.error("[provision] Failed to store credentials record:", credError.message);
+    // Non-fatal — don't block employee creation
+  }
+
+  // Audit log (no sensitive data)
+  console.log("[provision] auth_provisioned", {
+    event: "auth_provisioned",
+    employee_id: employee.id,
+    auth_user_id: authUserId,
+    org_id: orgId,
+    email_domain: employee.email.split("@")[1],
+    timestamp: new Date().toISOString(),
+  });
+
+  return { authUserId, email: employee.email, temporaryPassword };
+}
+
+/**
+ * Provision auth for an existing employee who has no auth account.
+ * POST /api/employees/:id/provision-auth
+ */
+async function provisionExistingEmployee(userId, employeeId, email) {
+  const orgId = await resolveOrgId(userId);
+  const employee = await assertEmployeeOwnership(employeeId, orgId);
+
+  if (employee.user_id) {
+    const err = new Error("This employee already has an auth account");
+    err.code = "ALREADY_PROVISIONED";
+    throw err;
+  }
+  if (employee.status === "terminated") {
+    const err = new Error("Cannot provision access for a terminated employee");
+    err.code = "TERMINATED";
+    throw err;
+  }
+
+  // Use provided email or fall back to employee's stored email
+  const resolvedEmail = email || employee.email;
+  if (!resolvedEmail) {
+    throw new Error("Email is required to provision an auth account");
+  }
+
+  const credentials = await provisionAuthAccount(
+    { id: employeeId, full_name: employee.full_name, phone: employee.phone, email: resolvedEmail },
+    orgId,
+    userId
+  );
+
+  return credentials;
+}
+
+/**
+ * Get stored credentials for an employee.
+ * Decrypts the stored password so the owner can share it again.
+ * Only works while is_active = true (before employee changes password).
+ */
+async function getEmployeeCredentials(userId, employeeId) {
+  const orgId = await resolveOrgId(userId);
+  await assertEmployeeOwnership(employeeId, orgId);
+
+  const { data, error } = await supabaseAdmin
+    .from("employee_credentials")
+    .select("id, employee_id, email, password_hash, is_active, created_at")
+    .eq("employee_id", employeeId)
+    .eq("org_id", orgId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) throw new Error("No credentials found for this employee");
+
+  // Decrypt the stored password — only possible while is_active = true
+  let temporaryPassword = null;
+  if (data.is_active && data.password_hash) {
+    temporaryPassword = decryptPassword(data.password_hash);
+  }
+
+  return {
+    employee_id: data.employee_id,
+    email: data.email,
+    is_active: data.is_active,
+    provisioned_at: data.created_at,
+    // Return decrypted password only while still active (employee hasn't changed it)
+    temporaryPassword: temporaryPassword ?? undefined,
+    note: data.is_active
+      ? "Temporary password is still active — employee has not changed it yet"
+      : "Employee has set their own password — temporary password no longer available",
+  };
+}
+
 // ─── Core CRUD ────────────────────────────────────────────────────────────────
 
 /**
@@ -257,8 +566,12 @@ async function getMyProfile(userId) {
 }
 
 /**
- * Create a new employee.
- * Side effects: generate code, validate plan limit, init leave balances.
+ * Create a new employee with automatic auth account provisioning.
+ * email is required — every employee gets a Supabase Auth account.
+ */
+/**
+ * Create a new employee with automatic auth account provisioning.
+ * email is required — every employee gets a Supabase Auth account.
  */
 async function createEmployee(userId, body) {
   const orgId = await resolveOrgId(userId);
@@ -271,26 +584,39 @@ async function createEmployee(userId, body) {
   // 2. Required field validation
   if (!fields.full_name) throw new Error("full_name is required");
   if (!fields.phone) throw new Error("phone is required");
+  if (!fields.email) throw new Error("Email is required to create an employee account");
   if (!fields.join_date_bs) throw new Error("join_date_bs is required");
   if (!fields.join_date_ad) throw new Error("join_date_ad is required");
   if (fields.basic_salary == null) throw new Error("basic_salary is required");
 
-  // 3. Generate employee code atomically via DB function
+  // 3. Provision auth account BEFORE inserting employee row.
+  //    This ensures email conflicts are caught before any DB row is created.
+  //    employee.id is not known yet — we pass null and back-fill after insert.
+  const { authUserId, temporaryPassword } = await provisionAuthAccount(
+    { id: null, full_name: fields.full_name, phone: fields.phone, email: fields.email },
+    orgId,
+    userId
+  );
+
+  // 4. Generate employee code atomically
   const employee_code = await generateEmployeeCode(orgId);
 
-  // 4. Insert employee
-  const { data: employee, error } = await supabaseAdmin
+  // 5. Insert employee row — link to the auth user we just created
+  const { data: rows, error } = await supabaseAdmin
     .from("employees")
     .insert({
       ...fields,
       org_id: orgId,
       employee_code,
+      user_id: authUserId,
+      app_access_status: "invited",
       created_by: userId,
     })
-    .select("*")
-    .single();
+    .select("*");
 
   if (error) {
+    // Clean up the auth user we already created
+    await supabaseAdmin.auth.admin.deleteUser(authUserId).catch(() => {});
     if (error.code === "23505") {
       if (error.message.includes("phone")) {
         throw new Error(`Phone number ${fields.phone} is already registered in this organization`);
@@ -300,15 +626,29 @@ async function createEmployee(userId, body) {
     throw error;
   }
 
-  // 5. Initialize leave balances for the join BS year
+  const employee = rows?.[0];
+  if (!employee) throw new Error("Employee insert succeeded but no row returned");
+
+  // 6. Back-fill employee_id on public.users and employee_credentials
+  await supabaseAdmin
+    .from("users")
+    .update({ employee_id: employee.id })
+    .eq("id", authUserId);
+
+  await supabaseAdmin
+    .from("employee_credentials")
+    .update({ employee_id: employee.id })
+    .eq("org_id", orgId)
+    .is("employee_id", null)
+    .eq("email", fields.email);
+
+  // 7. Initialize leave balances (non-fatal)
   const bsYear = parseInt(fields.join_date_bs?.split("-")[0]);
   if (bsYear) {
-    await initializeLeaveBalances(orgId, employee.id, bsYear).catch(() => {
-      // Non-fatal: leave balances can be created manually if leave_types not seeded
-    });
+    await initializeLeaveBalances(orgId, employee.id, bsYear).catch(() => {});
   }
 
-  return employee;
+  return { employee, credentials: { email: fields.email, temporaryPassword } };
 }
 
 /**
@@ -340,11 +680,12 @@ async function updateEmployee(userId, employeeId, body) {
 
 /**
  * Soft-terminate an employee.
- * Sets status = 'terminated', records exit dates and reason.
+ * Sets status = 'terminated', app_access_status = 'suspended'.
+ * Also bans the Supabase Auth user to prevent new logins.
  */
 async function deactivateEmployee(userId, employeeId, body) {
   const orgId = await resolveOrgId(userId);
-  await assertEmployeeOwnership(employeeId, orgId);
+  const employee = await assertEmployeeOwnership(employeeId, orgId);
 
   const patch = {
     status: "terminated",
@@ -355,16 +696,28 @@ async function deactivateEmployee(userId, employeeId, body) {
   if (body.exit_date_ad) patch.exit_date_ad = body.exit_date_ad;
   if (body.termination_reason) patch.termination_reason = body.termination_reason;
 
-  const { data, error } = await supabaseAdmin
+  const { data: rows, error } = await supabaseAdmin
     .from("employees")
     .update(patch)
     .eq("id", employeeId)
     .eq("org_id", orgId)
-    .select("*")
-    .single();
+    .select("*");
 
   if (error) throw error;
-  return data;
+  const updated = rows?.[0];
+  if (!updated) throw new Error("Employee not found");
+
+  // Ban the Supabase Auth user — 'none' = permanent ban
+  if (employee.user_id) {
+    await supabaseAdmin.auth.admin
+      .updateUserById(employee.user_id, { ban_duration: "none" })
+      .catch((err) => {
+        console.error("[deactivate] Failed to ban auth user:", err.message);
+        // Non-fatal — app_access_status = suspended still blocks via middleware
+      });
+  }
+
+  return updated;
 }
 
 // ─── Salary ───────────────────────────────────────────────────────────────────
@@ -740,6 +1093,8 @@ module.exports = {
   assignShift,
   assignWorkplace,
   inviteEmployee,
+  provisionExistingEmployee,
+  getEmployeeCredentials,
   uploadPhoto,
   listDocuments,
   uploadDocument,

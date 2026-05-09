@@ -47,6 +47,12 @@ router.put("/:id/workplace", requireOwnerRole, employeesController.assignWorkpla
 // POST /api/employees/:id/invite  — owner only
 router.post("/:id/invite", requireOwnerRole, employeesController.invite);
 
+// POST /api/employees/:id/provision-auth  — owner only
+router.post("/:id/provision-auth", requireOwnerRole, employeesController.provisionAuth);
+
+// GET  /api/employees/:id/credentials  — owner + hr_manager
+router.get("/:id/credentials", requireStaffRole, employeesController.getCredentials);
+
 // ─── Photo ────────────────────────────────────────────────────────────────────
 
 // PUT  /api/employees/:id/photo  — owner only

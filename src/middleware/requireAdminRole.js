@@ -1,19 +1,19 @@
 const { supabaseAdmin } = require("../config/supabase");
 
-/**
- * Checks that the authenticated user has role = 'admin' or 'super_admin'
- * in the public.users table. Must run after requireSupabaseUser.
- */
 async function requireAdminPlanRole(req, res, next) {
   try {
     const { data, error } = await supabaseAdmin
       .from("users")
       .select("role")
       .eq("id", req.user.id)
-      .single();
+      .maybeSingle();
 
-    if (error || !data) {
-      return res.status(403).json({ error: "User not found" });
+    if (error) {
+      console.error("[requireAdminPlanRole] DB error:", error.message);
+      return res.status(500).json({ error: error.message });
+    }
+    if (!data) {
+      return res.status(403).json({ error: "User profile not found — run PUT /api/users/me first" });
     }
 
     const allowedRoles = ["admin", "super_admin"];

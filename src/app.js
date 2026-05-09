@@ -8,6 +8,9 @@ const departmentsRoutes = require("./routes/departments.routes");
 const shiftsRoutes = require("./routes/shifts.routes");
 const workplacesRoutes = require("./routes/workplaces.routes");
 const employeesRoutes = require("./routes/employees.routes");
+const attendanceRoutes = require("./routes/attendance.routes");
+const authRoutes = require("./routes/auth.routes");
+const leavesRoutes = require("./routes/leaves.routes");
 
 function createApp() {
   const app = express();
@@ -40,6 +43,9 @@ function createApp() {
   app.use("/api/shifts", shiftsRoutes);
   app.use("/api/workplaces", workplacesRoutes);
   app.use("/api/employees", employeesRoutes);
+  app.use("/api/attendance", attendanceRoutes);
+  app.use("/api/auth", authRoutes);
+  app.use("/api/leaves", leavesRoutes);
 
   app.use((req, res) => {
     res.status(404).json({ error: "Not found" });

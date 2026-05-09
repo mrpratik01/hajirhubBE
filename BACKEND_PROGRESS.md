@@ -350,3 +350,59 @@
 | 🔧 Stub | 6 |
 | ⏳ Planned | ~40 |
 | **Total planned** | **~93** |
+
+
+---
+
+## Section Q — Employee Auth Provisioning ✅
+
+All tasks complete. New files:
+
+| File | Purpose |
+|------|---------|
+| `src/services/auth.service.js` | `getMe`, `changePassword` |
+| `src/controllers/auth.controller.js` | Auth endpoint handlers |
+| `src/routes/auth.routes.js` | `GET /api/auth/me`, `PUT /api/auth/change-password` |
+| `src/middleware/checkSuspension.js` | Blocks suspended employees |
+| `migrations/001_employee_auth_provisioning.sql` | DB migration to run in Supabase |
+
+New endpoints:
+
+| Method | Route | Role | Description |
+|--------|-------|------|-------------|
+| GET | `/api/auth/me` | employee | Profile + `password_changed`, activates on first login |
+| PUT | `/api/auth/change-password` | employee | Change temp password |
+| POST | `/api/employees/:id/provision-auth` | owner | Back-fill auth for existing employee |
+| GET | `/api/employees/:id/credentials` | owner, hr_manager | Retrieve stored email + active status |
+
+### ⚠️ Back-fill existing employees (one-time)
+
+Any employee created before this feature has no auth account (`user_id = null`).
+Run this SQL to find them, then call the provision endpoint for each:
+
+```sql
+-- Find employees without auth accounts
+SELECT id, full_name, email, phone, org_id
+FROM public.employees
+WHERE user_id IS NULL
+  AND status = 'active'
+ORDER BY created_at;
+```
+
+Then for each employee, call:
+```
+POST /api/employees/:id/provision-auth
+Authorization: Bearer <owner_token>
+Content-Type: application/json
+
+{ "email": "employee@example.com" }
+```
+
+This creates their auth account and stores credentials in `employee_credentials`.
+
+### ⚠️ Run migration in Supabase SQL Editor
+
+```sql
+-- Copy contents of migrations/001_employee_auth_provisioning.sql
+-- and run in Supabase Dashboard → SQL Editor
+```

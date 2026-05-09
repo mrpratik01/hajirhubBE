@@ -39,7 +39,7 @@ async function getUserRowById(userId) {
     .maybeSingle();
 
   if (error) throw error;
-  return data;
+  return data; // null if not found — callers must check
 }
 
 async function upsertUserProfile(userId, patch) {
