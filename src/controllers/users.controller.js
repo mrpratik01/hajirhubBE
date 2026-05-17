@@ -60,4 +60,33 @@ async function listAll(req, res) {
   }
 }
 
-module.exports = { getMe, putMe, listAll };
+/**
+ * POST /api/users/management/owner
+ * Called right after Supabase Auth signup to set up the owner profile.
+ * Sets role = 'owner', stores full_name, email, phone.
+ * create_org_later = true means they'll create the org in a separate step.
+ *
+ * Body: { full_name, email, phone, create_org_later? }
+ */
+async function setupOwner(req, res) {
+  try {
+    const { full_name, email, phone } = req.body ?? {};
+
+    if (!full_name) return res.status(400).json({ error: "full_name is required" });
+
+    const patch = {
+      full_name,
+      email: email ?? req.user.email ?? null,
+      phone: phone ?? null,
+      role: "owner",
+    };
+
+    const row = await usersService.upsertUserProfile(req.user.id, patch);
+    return res.status(201).json({ profile: row });
+  } catch (err) {
+    console.error("[users] setupOwner:", err);
+    return res.status(500).json({ error: err.message || "Failed to set up owner profile" });
+  }
+}
+
+module.exports = { getMe, putMe, listAll, setupOwner };

@@ -553,9 +553,11 @@ async function getMyProfile(userId) {
       `id, employee_code, full_name, full_name_nepali, phone, email,
        gender, date_of_birth_bs, date_of_birth_ad, designation,
        join_date_bs, join_date_ad, status, app_access_status, photo_url,
+       basic_salary, hra, travel_allowance, medical_allowance,
+       marital_status, bank_name, bank_account_no, bank_branch, bank_ifsc,
        department:department_id(id, name),
-       shift:shift_id(id, name, start_time, end_time),
-       workplace:workplace_id(id, name, address)`
+       shift:shift_id(id, name, start_time, end_time, working_days),
+       workplace:workplace_id(id, name, address, latitude, longitude, radius_meters, geofence_enabled)`
     )
     .eq("id", user.employee_id)
     .eq("org_id", user.org_id)

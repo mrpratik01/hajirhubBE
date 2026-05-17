@@ -301,8 +301,9 @@ async function checkInEmployee(userId, body, fileBuffer, mimeType) {
   const selfieUrl = await uploadSelfie(orgId, employee.id, dateAd, fileBuffer, mimeType);
   console.log("[checkIn] step 14 — selfie url:", selfieUrl ?? "null (no file)");
 
-  // Status
-  const status = calculateAttendanceStatus(now, shift, orgSettings.late_grace_minutes);
+  // Status - use current time for accurate calculation
+  const currentCheckInTime = new Date();
+  const status = calculateAttendanceStatus(currentCheckInTime, shift, orgSettings.late_grace_minutes);
   console.log("[checkIn] step 15 — calculated status:", status);
 
   const insertPayload = {
@@ -312,7 +313,7 @@ async function checkInEmployee(userId, body, fileBuffer, mimeType) {
     shift_id: employee.shift_id ?? null,
     date_bs: dateBs,
     date_ad: dateAd,
-    check_in_time: now.toISOString(),
+    check_in_time: currentCheckInTime.toISOString(), // Use current time at check-in
     check_in_lat: lat,
     check_in_lng: lng,
     check_in_accuracy_m: accuracy_m ?? null,
@@ -357,8 +358,8 @@ async function checkOutEmployee(userId, body) {
 
   const employee = await getEmployeeByUserId(userId);
 
-  const now = new Date();
-  const dateAd = now.toISOString().split("T")[0];
+  const currentCheckOutTime = new Date();
+  const dateAd = currentCheckOutTime.toISOString().split("T")[0];
 
   // Find today's open check-in
   const { data: attendance, error: fetchError } = await supabaseAdmin
@@ -373,12 +374,12 @@ async function checkOutEmployee(userId, body) {
   if (fetchError) throw fetchError;
   if (!attendance) throw new Error("No active check-in found for today");
 
-  const workingMinutes = calculateWorkingMinutes(attendance.check_in_time, now.toISOString());
+  const workingMinutes = calculateWorkingMinutes(attendance.check_in_time, currentCheckOutTime.toISOString());
 
   const { data: updateRows, error } = await supabaseAdmin
     .from("attendance")
     .update({
-      check_out_time: now.toISOString(),
+      check_out_time: currentCheckOutTime.toISOString(),
       check_out_lat: lat,
       check_out_lng: lng,
       working_minutes: workingMinutes,
@@ -632,45 +633,83 @@ async function getMyAttendance(userId, query = {}) {
 
 /**
  * Manual correction — owner only.
+ * Supports upsert: if attendanceId is not provided/null, uses employee_id + date_bs.
  */
 async function manualCorrection(userId, attendanceId, body) {
   const orgId = await resolveOrgId(userId);
 
+  const {
+    employee_id,
+    date_bs,
+    date_ad,
+    check_in_time,
+    check_out_time,
+    status,
+    correction_note,
+  } = body;
+
   const ALLOWED = new Set([
-    "check_in_time", "check_out_time", "status",
-    "working_minutes", "override_reason",
+    "check_in_time",
+    "check_out_time",
+    "status",
+    "working_minutes",
+    "override_reason",
   ]);
 
-  const patch = {};
+  const patch = {
+    org_id: orgId,
+    is_manual_correction: true,
+    correction_by: userId,
+    correction_note: correction_note,
+  };
+
   for (const key of ALLOWED) {
     if (Object.prototype.hasOwnProperty.call(body, key)) {
       patch[key] = body[key];
     }
   }
 
-  if (Object.keys(patch).length === 0) throw new Error("No valid fields to update");
-
-  patch.is_manual_correction = true;
-  patch.correction_by = userId;
-  if (body.correction_note) patch.correction_note = body.correction_note;
-
   // Recalculate working_minutes if both times provided
   if (patch.check_in_time && patch.check_out_time) {
     patch.working_minutes = calculateWorkingMinutes(patch.check_in_time, patch.check_out_time);
   }
 
-  const { data: updateRows, error } = await supabaseAdmin
-    .from("attendance")
-    .update(patch)
-    .eq("id", attendanceId)
-    .eq("org_id", orgId)
-    .select("*");
+  // Determine if we are updating by ID or by Employee+Date
+  const isNew = !attendanceId || attendanceId === "null" || attendanceId === "new";
+  
+  let query = supabaseAdmin.from("attendance");
 
-  if (error) throw error;
+  if (isNew) {
+    if (!employee_id || !date_bs) {
+      throw new Error("employee_id and date_bs are required for new corrections");
+    }
+    
+    // For new records, we need some defaults
+    patch.employee_id = employee_id;
+    patch.date_bs = date_bs;
+    patch.date_ad = date_ad || new Date().toISOString().split("T")[0];
+    if (!patch.status) patch.status = "present";
 
-  const updated = updateRows?.[0];
-  if (!updated) throw new Error("Attendance record not found");
-  return updated;
+    // Use upsert with ON CONFLICT (employee_id, date_bs)
+    const { data, error } = await query
+      .upsert(patch, { onConflict: "employee_id, date_bs" })
+      .select("*");
+      
+    if (error) throw error;
+    return data?.[0];
+  } else {
+    // Standard update by ID
+    const { data, error } = await query
+      .update(patch)
+      .eq("id", attendanceId)
+      .eq("org_id", orgId)
+      .select("*");
+
+    if (error) throw error;
+    const updated = data?.[0];
+    if (!updated) throw new Error("Attendance record not found");
+    return updated;
+  }
 }
 
 /**

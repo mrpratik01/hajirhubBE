@@ -178,4 +178,16 @@ function todayBs() {
   return adToBs(adStr);
 }
 
-module.exports = { adToBs, getBsYear, todayBs };
+/**
+ * Get number of days in a given BS month.
+ * @param {number} year - e.g. 2082
+ * @param {number} month - 1-indexed, e.g. 8 (Mangsir)
+ * @returns {number}
+ */
+function getDaysInBsMonth(year, month) {
+  const months = ALL_BS_MONTHS[year];
+  if (!months) throw new Error(`BS year ${year} not supported`);
+  return months[month - 1];
+}
+
+module.exports = { adToBs, getBsYear, todayBs, getDaysInBsMonth };
