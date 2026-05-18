@@ -46,6 +46,17 @@ function isDeviceTextBody(req) {
   return contentType.startsWith("text/plain") || contentType.startsWith("application/octet-stream");
 }
 
+function isIclockDeviceEndpoint(path) {
+  return (
+    path.startsWith("/iclock/getrequest") ||
+    path.startsWith("/iclock/cdata") ||
+    path.startsWith("/iclock/devicecmd") ||
+    path.startsWith("/api/iclock/getrequest") ||
+    path.startsWith("/api/iclock/cdata") ||
+    path.startsWith("/api/iclock/devicecmd")
+  );
+}
+
 function createApp() {
   const app = express();
 
@@ -54,8 +65,11 @@ function createApp() {
   app.use(cors(createCorsOptions()));
   app.options(/.*/, cors(createCorsOptions()));
 
-  // Special raw text parser for ADMS Biometric devices
+  // Special raw text parser for ADMS Biometric devices.
+  // Support both the production terminal path (/iclock/...) and the API
+  // namespace used by local dashboard/dev clients (/api/iclock/...).
   app.use("/iclock", express.text({ type: isDeviceTextBody, limit: "10mb" }));
+  app.use("/api/iclock", express.text({ type: isDeviceTextBody, limit: "10mb" }));
 
   app.use(express.json({ limit: "10mb" }));
   app.use(express.urlencoded({ extended: true, limit: "10mb" }));
@@ -66,6 +80,7 @@ function createApp() {
   });
 
   app.use("/iclock", iclockRoutes);
+  app.use("/api/iclock", iclockRoutes);
 
   app.use("/api/users/management", userManagementRoutes);
   app.use("/api/users", usersRoutes);
@@ -83,6 +98,7 @@ function createApp() {
   app.use("/api/payroll", payrollRoutes);
   app.use("/api/reports", reportsRoutes);
   app.use("/api/hardware", hardwareRoutes);
+  app.use("/api/iclock", hardwareRoutes);
 
   app.use((req, res) => {
     res.status(404).json({ error: "Not found" });
@@ -96,7 +112,7 @@ function createApp() {
       stack: process.env.NODE_ENV === "production" ? undefined : err.stack,
     });
 
-    if (req.path.startsWith("/iclock")) {
+    if (isIclockDeviceEndpoint(req.path)) {
       return res.status(200).send("OK");
     }
 

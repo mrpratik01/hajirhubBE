@@ -58,18 +58,31 @@ Path/routes:
 /iclock/cdata
 ```
 
-ZKTeco ADMS routes run on the same Express app and same hosting port as the API:
+ZKTeco ADMS routes run on the same Express app and same hosting port as the API.
+The plain `/iclock/...` paths are the preferred production terminal paths, and
+`/api/iclock/...` is also supported for development/proxy setups:
 
 ```text
 GET  /iclock/getrequest
 GET  /iclock/cdata
 POST /iclock/cdata
+GET  /api/iclock/getrequest
+GET  /api/iclock/cdata
+POST /api/iclock/cdata
 ```
 
-Normal application API routes stay under:
+Dashboard device management is authenticated and available at both paths:
 
 ```text
-/api/...
+GET    /api/hardware/devices
+POST   /api/hardware/devices
+PUT    /api/hardware/devices/:id
+DELETE /api/hardware/devices/:id
+
+GET    /api/iclock/devices
+POST   /api/iclock/devices
+PUT    /api/iclock/devices/:id
+DELETE /api/iclock/devices/:id
 ```
 
 ### Production Smoke Tests
