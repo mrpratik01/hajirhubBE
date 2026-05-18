@@ -1,6 +1,40 @@
 const { supabaseAdmin } = require("../config/supabase");
 const { adToBs } = require("../utils/nepaliDate");
 
+const NEPAL_OFFSET_MS = (5 * 60 + 45) * 60 * 1000; // 5 hours 45 mins in ms
+
+/**
+ * Helper to get current Nepal Time (UTC + 5:45)
+ */
+function getNepalTime(date = new Date()) {
+  return new Date(date.getTime() + NEPAL_OFFSET_MS);
+}
+
+/**
+ * Helper to convert Nepal Time string from device back to UTC Date object
+ * input: "2026-05-17 18:03:57" (Nepal Time)
+ * output: Date Object (UTC)
+ */
+function deviceTimeToUTC(timeStr) {
+  // Regex to parse "YYYY-MM-DD HH:mm:ss"
+  const match = String(timeStr || "").trim().match(
+    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/
+  );
+
+  if (!match) {
+    console.error(`[ADMS] Invalid timestamp format: ${timeStr}`);
+    return new Date(); // Fallback to now
+  }
+
+  const [, year, month, day, hour, minute, second] = match.map(Number);
+  
+  // Date.UTC returns timestamp in UTC
+  const utcTs = Date.UTC(year, month - 1, day, hour, minute, second);
+  
+  // Subtract Nepal offset to get true UTC
+  return new Date(utcTs - NEPAL_OFFSET_MS);
+}
+
 /**
  * Handle ADMS getrequest (Command Polling)
  */
@@ -8,7 +42,9 @@ async function handleGetRequest(query) {
   const { SN, INFO } = query;
   console.log(`[ADMS Debug] GET Request from SN: ${SN}`);
   
-  const now = new Date();
+  const now = new Date(); // Actual UTC now
+  const nepalNow = getNepalTime(now); // Local Display Time for Machine
+  
   const patch = {
     last_heartbeat_at: now.toISOString(),
     is_online: true 
@@ -33,7 +69,6 @@ async function handleGetRequest(query) {
 
   if (fetchErr) {
     console.error(`[ADMS Debug] Device lookup failed:`, fetchErr.message);
-    // Don't send sync command if device not found
   }
 
   // 2. Update Heartbeat
@@ -50,12 +85,13 @@ async function handleGetRequest(query) {
   const lastSync = device?.last_synced_at ? new Date(device.last_synced_at) : null;
 
   if (!lastSync || lastSync < oneHourAgo) {
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const hours = String(now.getHours()).padStart(2, '0');
-    const mins = String(now.getMinutes()).padStart(2, '0');
-    const secs = String(now.getSeconds()).padStart(2, '0');
+    // We use UTC methods on the nepalNow object because it already has the +5:45 added
+    const year = nepalNow.getUTCFullYear();
+    const month = String(nepalNow.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(nepalNow.getUTCDate()).padStart(2, '0');
+    const hours = String(nepalNow.getUTCHours()).padStart(2, '0');
+    const mins = String(nepalNow.getUTCMinutes()).padStart(2, '0');
+    const secs = String(nepalNow.getUTCSeconds()).padStart(2, '0');
     
     const serverTime = `${year}-${month}-${day} ${hours}:${mins}:${secs}`;
     const setTimeCmd = `C:101:SETTIME ${serverTime}\n`;
@@ -66,7 +102,7 @@ async function handleGetRequest(query) {
       .update({ last_synced_at: now.toISOString() })
       .eq("serial_number", SN);
 
-    console.log(`[ADMS Debug] Syncing Time. Sending Command: ${setTimeCmd.trim()}`);
+    console.log(`[ADMS Debug] Syncing Nepal Time: ${serverTime}. Sending Command: ${setTimeCmd.trim()}`);
     return setTimeCmd;
   }
 
@@ -94,7 +130,6 @@ async function handlePostData(query, rawBody) {
   console.log(`[ADMS Debug] POST Request - SN: ${SN}, Table: ${table}`);
   
   if (table !== "ATTLOG") {
-    console.log(`[ADMS Debug] Skipping non-ATTLOG table: ${table}`);
     return "OK";
   }
 
@@ -108,28 +143,24 @@ async function handlePostData(query, rawBody) {
     .single();
 
   if (devError || !device) {
-    console.error(`[ADMS Debug] Device lookup failed for SN: ${SN}. Error: ${devError?.message || "Not Found"}`);
+    console.error(`[ADMS Debug] Device lookup failed for SN: ${SN}`);
     return "OK";
   }
 
   const lines = rawBody.trim().split("\n");
-  console.log(`[ADMS Debug] Processing ${lines.length} log lines...`);
 
   for (const line of lines) {
     if (!line.trim()) continue;
     
-    console.log(`[ADMS Debug] Parsing line: ${line}`);
     const parts = line.split("\t");
-    if (parts.length < 2) {
-      console.warn(`[ADMS Debug] Line has insufficient parts: ${parts.length}`);
-      continue;
-    }
+    if (parts.length < 2) continue;
 
     const deviceUserId = parts[0].trim();
-    const punchTimeStr = parts[1].trim();
+    const punchTimeStr = parts[1].trim(); // "2026-05-17 18:03:57" (Nepal Time)
     const verifyModeRaw = parts[2]?.trim();
     
-    console.log(`[ADMS Debug] Mapped data - User: ${deviceUserId}, Time: ${punchTimeStr}, Mode: ${verifyModeRaw}`);
+    // Convert machine local time to UTC for DB storage
+    const punchTimeUTC = deviceTimeToUTC(punchTimeStr);
 
     let verificationMode = "finger";
     if (verifyModeRaw === "1" || verifyModeRaw === "finger") verificationMode = "finger";
@@ -144,7 +175,7 @@ async function handlePostData(query, rawBody) {
         org_id: device.org_id,
         device_id: device.id,
         device_user_id: deviceUserId,
-        punch_time: new Date(punchTimeStr).toISOString(),
+        punch_time: punchTimeUTC.toISOString(), 
         verification_mode: verificationMode,
         processing_status: "pending",
         raw_payload: { raw_line: line.trim(), sn: SN }
@@ -159,9 +190,7 @@ async function handlePostData(query, rawBody) {
 
     // 3. Process the Punch
     try {
-      console.log(`[ADMS Debug] Starting attendance processing for Raw Log ID: ${rawLog.id}`);
-      await processBiometricPunch(rawLog.id, device.org_id, deviceUserId, punchTimeStr, device.workplace_id);
-      console.log(`[ADMS Debug] Successfully processed punch for User: ${deviceUserId}`);
+      await processBiometricPunch(rawLog.id, device.org_id, deviceUserId, punchTimeUTC, device.workplace_id);
     } catch (err) {
       console.error(`[ADMS Debug] Punch Processing Error:`, err.message);
       await supabaseAdmin
@@ -177,9 +206,7 @@ async function handlePostData(query, rawBody) {
 /**
  * Maps the raw punch to an employee and creates/updates attendance.
  */
-async function processBiometricPunch(rawLogId, orgId, deviceUserId, timestampStr, workplaceId) {
-  console.log(`[ADMS Debug] Looking up employee with biometric_user_id: ${deviceUserId} in Org: ${orgId}`);
-  
+async function processBiometricPunch(rawLogId, orgId, deviceUserId, punchTimeUTC, workplaceId) {
   // 1. Find Employee by biometric_user_id
   const { data: employee, error: empError } = await supabaseAdmin
     .from("employees")
@@ -189,7 +216,6 @@ async function processBiometricPunch(rawLogId, orgId, deviceUserId, timestampStr
     .single();
 
   if (empError || !employee) {
-    console.error(`[ADMS Debug] Employee NOT FOUND for ID: ${deviceUserId}`);
     await supabaseAdmin
       .from("biometric_raw_logs")
       .update({ processing_status: "unmatched", error_reason: "Employee not found for this device_user_id" })
@@ -197,10 +223,7 @@ async function processBiometricPunch(rawLogId, orgId, deviceUserId, timestampStr
     return;
   }
 
-  console.log(`[ADMS Debug] Found Employee: ${employee.full_name} (${employee.id})`);
-
-  const punchTime = new Date(timestampStr);
-  const dateAd = timestampStr.split(" ")[0];
+  const dateAd = punchTimeUTC.toISOString().split("T")[0];
   const dateBs = adToBs(dateAd);
 
   // 2. Attendance Upsert Logic (Check-in / Check-out)
@@ -214,7 +237,6 @@ async function processBiometricPunch(rawLogId, orgId, deviceUserId, timestampStr
   let attendanceId;
 
   if (!existing) {
-    console.log(`[ADMS Debug] No existing record for ${dateBs}. Creating Check-in.`);
     const { data: newAtt, error: insError } = await supabaseAdmin
       .from("attendance")
       .insert({
@@ -224,7 +246,7 @@ async function processBiometricPunch(rawLogId, orgId, deviceUserId, timestampStr
         shift_id: employee.shift_id,
         date_bs: dateBs,
         date_ad: dateAd,
-        check_in_time: punchTime.toISOString(),
+        check_in_time: punchTimeUTC.toISOString(),
         status: "present",
         geofence_status: "inside",
         is_offline_record: false
@@ -235,15 +257,14 @@ async function processBiometricPunch(rawLogId, orgId, deviceUserId, timestampStr
     if (insError) throw insError;
     attendanceId = newAtt.id;
   } else {
-    console.log(`[ADMS Debug] Existing record found. Updating Check-out.`);
     attendanceId = existing.id;
     const checkInTime = new Date(existing.check_in_time);
-    const workingMinutes = Math.round((punchTime - checkInTime) / (1000 * 60));
+    const workingMinutes = Math.round((punchTimeUTC - checkInTime) / (1000 * 60));
 
     const { error: updError } = await supabaseAdmin
       .from("attendance")
       .update({
-        check_out_time: punchTime.toISOString(),
+        check_out_time: punchTimeUTC.toISOString(),
         working_minutes: Math.max(0, workingMinutes)
       })
       .eq("id", existing.id);
@@ -370,7 +391,6 @@ async function assignBiometricId(userId, employeeId, requestedId = null) {
   let finalId = requestedId;
 
   if (!finalId) {
-    // Find the current maximum biometric_user_id in this organization
     const { data: employees, error: fetchError } = await supabaseAdmin
       .from("employees")
       .select("biometric_user_id")
@@ -379,7 +399,6 @@ async function assignBiometricId(userId, employeeId, requestedId = null) {
 
     if (fetchError) throw fetchError;
 
-    // Filter for numeric IDs and find the max
     const numericIds = employees
       .map(e => parseInt(e.biometric_user_id))
       .filter(id => !isNaN(id));
@@ -388,7 +407,6 @@ async function assignBiometricId(userId, employeeId, requestedId = null) {
     finalId = (maxId + 1).toString();
   }
 
-  // Check if ID is already taken in this org
   const { data: existing } = await supabaseAdmin
     .from("employees")
     .select("id")
@@ -399,7 +417,6 @@ async function assignBiometricId(userId, employeeId, requestedId = null) {
 
   if (existing) throw new Error(`Biometric User ID ${finalId} is already assigned to another employee.`);
 
-  // Update employee
   const { data, error } = await supabaseAdmin
     .from("employees")
     .update({ biometric_user_id: finalId })

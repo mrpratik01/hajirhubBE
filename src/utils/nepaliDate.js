@@ -1,193 +1,58 @@
-/**
- * Nepali (Bikram Sambat) Date Utility
- *
- * Converts AD (Gregorian) dates to BS (Bikram Sambat) dates.
- * Uses a lookup table for accurate conversion without external dependencies.
- *
- * BS year range supported: 2000–2090
- */
+const NepaliDateModule = require("nepali-date-converter");
 
-// Number of days in each month of each BS year
-// Index 0 = Baisakh (month 1), Index 11 = Chaitra (month 12)
-const BS_MONTH_DAYS = {
-  2070: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 30],
-  2071: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2072: [31, 32, 31, 32, 31, 30, 30, 30, 29, 30, 29, 31],
-  2073: [30, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2074: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2075: [31, 32, 31, 32, 31, 30, 30, 29, 30, 29, 30, 30],
-  2076: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2077: [30, 32, 31, 32, 31, 30, 30, 30, 29, 30, 29, 31],
-  2078: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2079: [31, 32, 31, 32, 31, 30, 30, 29, 30, 29, 30, 30],
-  2080: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2081: [30, 32, 31, 32, 31, 30, 30, 30, 29, 30, 29, 31],
-  2082: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2083: [31, 32, 31, 32, 31, 30, 30, 29, 30, 29, 30, 30],
-  2084: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2085: [30, 32, 31, 32, 31, 30, 30, 30, 29, 30, 29, 31],
-  2086: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2087: [31, 32, 31, 32, 31, 30, 30, 29, 30, 29, 30, 30],
-  2088: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2089: [30, 32, 31, 32, 31, 30, 30, 30, 29, 30, 29, 31],
-  2090: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-};
+const NepaliDate = NepaliDateModule.default || NepaliDateModule;
 
-// BS epoch: 2000 Baisakh 1 = 1943 April 14 AD
-const BS_EPOCH_YEAR = 2000;
-const AD_EPOCH = new Date(1943, 3, 14); // April 14, 1943 (month is 0-indexed)
+function assertDateString(value, label) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) {
+    throw new Error(`${label} must be in YYYY-MM-DD format`);
+  }
+}
 
-// Days in each month of each BS year from 2000 onwards
-// For years before 2070, use a simplified table
-const BS_MONTH_DAYS_EARLY = {
-  2000: [30, 32, 31, 32, 31, 30, 30, 30, 29, 30, 30, 30],
-  2001: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2002: [31, 32, 31, 32, 31, 30, 30, 29, 30, 29, 30, 30],
-  2003: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2004: [30, 32, 31, 32, 31, 30, 30, 30, 29, 30, 29, 31],
-  2005: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2006: [31, 32, 31, 32, 31, 30, 30, 29, 30, 29, 30, 30],
-  2007: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2008: [31, 31, 31, 32, 31, 31, 29, 30, 30, 29, 29, 31],
-  2009: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2010: [31, 32, 31, 32, 31, 30, 30, 29, 30, 29, 30, 30],
-  2011: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2012: [31, 31, 31, 32, 31, 31, 29, 30, 30, 29, 30, 30],
-  2013: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2014: [31, 32, 31, 32, 31, 30, 30, 29, 30, 29, 30, 30],
-  2015: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2016: [31, 31, 31, 32, 31, 31, 29, 30, 30, 29, 30, 30],
-  2017: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2018: [31, 32, 31, 32, 31, 30, 30, 29, 30, 29, 30, 30],
-  2019: [31, 32, 31, 32, 31, 30, 30, 30, 29, 30, 29, 31],
-  2020: [31, 31, 31, 32, 31, 31, 30, 29, 30, 29, 30, 30],
-  2021: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2022: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 30],
-  2023: [31, 32, 31, 32, 31, 30, 30, 30, 29, 30, 29, 31],
-  2024: [31, 31, 31, 32, 31, 31, 30, 29, 30, 29, 30, 30],
-  2025: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2026: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2027: [30, 32, 31, 32, 31, 30, 30, 30, 29, 30, 29, 31],
-  2028: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2029: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2030: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2031: [30, 32, 31, 32, 31, 30, 30, 30, 29, 30, 29, 31],
-  2032: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2033: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2034: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2035: [30, 32, 31, 32, 31, 31, 29, 30, 30, 29, 29, 31],
-  2036: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2037: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2038: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2039: [31, 31, 31, 32, 31, 31, 29, 30, 30, 29, 30, 30],
-  2040: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2041: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2042: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2043: [31, 31, 31, 32, 31, 31, 29, 30, 30, 29, 30, 30],
-  2044: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2045: [31, 32, 31, 32, 31, 30, 30, 29, 30, 29, 30, 30],
-  2046: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2047: [31, 31, 31, 32, 31, 31, 30, 29, 29, 30, 30, 30],
-  2048: [29, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2049: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2050: [31, 32, 31, 32, 31, 30, 30, 29, 30, 29, 30, 30],
-  2051: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2052: [31, 31, 31, 32, 31, 31, 29, 30, 30, 29, 30, 30],
-  2053: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2054: [31, 32, 31, 32, 31, 30, 30, 29, 30, 29, 30, 30],
-  2055: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2056: [31, 31, 31, 32, 31, 31, 29, 30, 30, 29, 30, 30],
-  2057: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2058: [31, 32, 31, 32, 31, 30, 30, 29, 30, 29, 30, 30],
-  2059: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2060: [31, 31, 31, 32, 31, 31, 29, 30, 29, 30, 29, 31],
-  2061: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2062: [31, 32, 31, 32, 31, 30, 30, 29, 30, 29, 30, 30],
-  2063: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2064: [31, 31, 31, 32, 31, 31, 29, 30, 30, 29, 30, 30],
-  2065: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-  2066: [31, 32, 31, 32, 31, 30, 30, 29, 30, 29, 30, 30],
-  2067: [31, 32, 31, 32, 31, 30, 30, 30, 29, 29, 30, 31],
-  2068: [31, 31, 31, 32, 31, 31, 29, 30, 30, 29, 30, 30],
-  2069: [31, 31, 32, 31, 31, 31, 30, 29, 30, 29, 30, 30],
-};
+function formatAdDate(date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+}
 
-const ALL_BS_MONTHS = { ...BS_MONTH_DAYS_EARLY, ...BS_MONTH_DAYS };
+function formatBsDate(bsDate) {
+  return [
+    bsDate.getYear(),
+    String(bsDate.getMonth() + 1).padStart(2, "0"),
+    String(bsDate.getDate()).padStart(2, "0"),
+  ].join("-");
+}
 
-/**
- * Convert an AD date string (YYYY-MM-DD) to a BS date string (YYYY-MM-DD).
- * @param {string} adDateStr - e.g. "2025-04-14"
- * @returns {string} - e.g. "2082-01-01"
- */
 function adToBs(adDateStr) {
-  const adDate = new Date(adDateStr + "T00:00:00Z");
-
-  // Days since AD epoch (1943-04-14)
-  const epochMs = Date.UTC(1943, 3, 14); // April 14, 1943
-  const adMs = adDate.getTime();
-  let totalDays = Math.floor((adMs - epochMs) / (1000 * 60 * 60 * 24));
-
-  if (totalDays < 0) {
-    throw new Error(`Date ${adDateStr} is before the supported BS range (1943-04-14)`);
-  }
-
-  let bsYear = BS_EPOCH_YEAR;
-  let bsMonth = 1;
-  let bsDay = 1;
-
-  // Walk through BS years
-  outer: while (true) {
-    const months = ALL_BS_MONTHS[bsYear];
-    if (!months) {
-      throw new Error(`BS year ${bsYear} not in lookup table. Supported range: 2000–2090`);
-    }
-
-    for (let m = 0; m < 12; m++) {
-      const daysInMonth = months[m];
-      if (totalDays < daysInMonth) {
-        bsMonth = m + 1;
-        bsDay = totalDays + 1;
-        break outer;
-      }
-      totalDays -= daysInMonth;
-    }
-    bsYear++;
-  }
-
-  const mm = String(bsMonth).padStart(2, "0");
-  const dd = String(bsDay).padStart(2, "0");
-  return `${bsYear}-${mm}-${dd}`;
+  assertDateString(adDateStr, "AD date");
+  const [year, month, day] = adDateStr.split("-").map(Number);
+  return formatBsDate(new NepaliDate(new Date(year, month - 1, day)));
 }
 
-/**
- * Get the BS year from an AD date string.
- * @param {string} adDateStr - e.g. "2025-04-14"
- * @returns {number} - e.g. 2082
- */
+function bsToAd(bsDateStr) {
+  assertDateString(bsDateStr, "BS date");
+  const [year, month, day] = bsDateStr.split("-").map(Number);
+  const adDate = new NepaliDate(year, month - 1, day).toJsDate();
+  return formatAdDate(adDate);
+}
+
 function getBsYear(adDateStr) {
-  return parseInt(adToBs(adDateStr).split("-")[0]);
+  return Number(adToBs(adDateStr).split("-")[0]);
 }
 
-/**
- * Get today's date as a BS string.
- * @returns {string} - e.g. "2082-01-21"
- */
 function todayBs() {
   const now = new Date();
-  const adStr = now.toISOString().split("T")[0];
+  const adStr = formatAdDate(now);
   return adToBs(adStr);
 }
 
-/**
- * Get number of days in a given BS month.
- * @param {number} year - e.g. 2082
- * @param {number} month - 1-indexed, e.g. 8 (Mangsir)
- * @returns {number}
- */
 function getDaysInBsMonth(year, month) {
-  const months = ALL_BS_MONTHS[year];
-  if (!months) throw new Error(`BS year ${year} not supported`);
-  return months[month - 1];
+  const start = new NepaliDate(year, month - 1, 1).toJsDate();
+  const nextYear = month === 12 ? year + 1 : year;
+  const nextMonth = month === 12 ? 0 : month;
+  const next = new NepaliDate(nextYear, nextMonth, 1).toJsDate();
+  return Math.round((next.getTime() - start.getTime()) / 86400000);
 }
 
-module.exports = { adToBs, getBsYear, todayBs, getDaysInBsMonth };
+module.exports = { adToBs, bsToAd, getBsYear, todayBs, getDaysInBsMonth };

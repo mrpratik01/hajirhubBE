@@ -204,6 +204,26 @@ async function getMonthly(req, res) {
 }
 
 /**
+ * GET /api/attendance/report
+ * Owner + HR: Enhanced attendance report with custom date range.
+ * Query params:
+ *   - month: "2082-08" (single BS month)
+ *   - start_date: "2082-08-01" (start of range, BS by default)
+ *   - end_date: "2082-08-30" (end of range, BS by default)
+ *   - date_mode: "bs" | "ad" (set "ad" when using AD date range)
+ *   - department_id: filter by department
+ *   - status: filter by status (present, absent, late, etc.)
+ */
+async function getAttendanceReport(req, res) {
+  try {
+    const data = await attendanceService.getMonthlyAttendanceReport(req.user.id, req.query);
+    return res.json({ data });
+  } catch (err) {
+    return handleError(res, err, "Get attendance report");
+  }
+}
+
+/**
  * GET /api/attendance/employee/:id?month=2082-08&page=1&limit=31
  * Owner + HR: history for a specific employee.
  */
@@ -268,6 +288,7 @@ module.exports = {
   qrCheckIn,
   getToday,
   getMonthly,
+  getAttendanceReport,
   getEmployeeHistory,
   getMyAttendance,
   manualCorrection,

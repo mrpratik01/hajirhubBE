@@ -1,10 +1,13 @@
 require("dotenv").config();
 
 const { createApp } = require("./src/app");
+const { startDeviceTimeSyncScheduler } = require("./src/services/deviceTimeSync.service");
 
 const port = Number(process.env.PORT) || 3001; // Main API Port
 const biometricPort = 8081; // Dedicated Biometric ADMS Port
 const app = createApp();
+
+startDeviceTimeSyncScheduler();
 
 // Start main listener
 const mainServer = app.listen(port, "0.0.0.0", () => {

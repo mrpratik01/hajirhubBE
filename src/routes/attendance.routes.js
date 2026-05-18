@@ -49,6 +49,9 @@ router.get("/today", requireStaffRole, attendanceController.getToday);
 // GET /api/attendance/monthly?month=2082-08
 router.get("/monthly", requireStaffRole, attendanceController.getMonthly);
 
+// GET /api/attendance/report?start_date=2082-08-01&end_date=2082-08-30
+router.get("/report", requireStaffRole, attendanceController.getAttendanceReport);
+
 // GET /api/attendance/employee/:id?month=2082-08&page=1&limit=31
 router.get("/employee/:id", requireStaffRole, attendanceController.getEmployeeHistory);
 
