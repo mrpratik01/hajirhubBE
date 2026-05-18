@@ -2,6 +2,8 @@ const { supabaseAdmin } = require("../config/supabase");
 const { adToBs } = require("../utils/nepaliDate");
 
 const NEPAL_OFFSET_MS = (5 * 60 + 45) * 60 * 1000; // 5 hours 45 mins in ms
+const DEFAULT_DEVICE_TIME_SYNC_INTERVAL_HOURS = 6;
+const DELAYED_LOG_THRESHOLD_HOURS = 24;
 
 /**
  * Helper to get current Nepal Time (UTC + 5:45)
@@ -23,24 +25,77 @@ function deviceTimeToUTC(timeStr) {
 
   if (!match) {
     console.error(`[ADMS] Invalid timestamp format: ${timeStr}`);
-    return new Date(); // Fallback to now
+    return null;
   }
 
   const [, year, month, day, hour, minute, second] = match.map(Number);
-  
-  // Date.UTC returns timestamp in UTC
-  const utcTs = Date.UTC(year, month - 1, day, hour, minute, second);
-  
-  // Subtract Nepal offset to get true UTC
-  return new Date(utcTs - NEPAL_OFFSET_MS);
+  if (
+    month < 1 || month > 12 ||
+    day < 1 || day > 31 ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59
+  ) {
+    console.error(`[ADMS] Invalid timestamp value: ${timeStr}`);
+    return null;
+  }
+
+  // Store the device-provided timestamp as a UTC ISO instant. Do not manually
+  // add or subtract the Nepal offset before saving.
+  return new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+}
+
+function getDeviceTimeSyncIntervalMs() {
+  const hours = Number(process.env.DEVICE_TIME_SYNC_INTERVAL_HOURS);
+  const safeHours = Number.isFinite(hours) && hours > 0
+    ? hours
+    : DEFAULT_DEVICE_TIME_SYNC_INTERVAL_HOURS;
+  return safeHours * 60 * 60 * 1000;
+}
+
+function isDeviceTimeSyncEnabled() {
+  return String(process.env.ENABLE_DEVICE_TIME_SYNC || "false").toLowerCase() === "true";
+}
+
+function getBodyParams(body) {
+  if (!body || Buffer.isBuffer(body) || typeof body !== "object") return {};
+  return body;
+}
+
+function normalizeQuery(query = {}, body = {}) {
+  const bodyParams = getBodyParams(body);
+  return {
+    SN: query.SN || query.sn || query.SerialNumber || query.serial_number || bodyParams.SN || bodyParams.sn,
+    table: query.table || query.Table || query.TABLE || bodyParams.table || bodyParams.Table || bodyParams.TABLE,
+    INFO: query.INFO || query.info || bodyParams.INFO || bodyParams.info,
+  };
+}
+
+function normalizeRawBody(rawBody) {
+  if (!rawBody) return "";
+  if (Buffer.isBuffer(rawBody)) return rawBody.toString("utf8").replace(/\\t/g, "\t").replace(/\r\n/g, "\n").trim();
+  if (typeof rawBody === "object") {
+    const payload = rawBody.data || rawBody.payload || rawBody.raw || rawBody.ATTLOG || rawBody.attlog;
+    if (payload) return normalizeRawBody(payload);
+
+    const entries = Object.entries(rawBody);
+    if (entries.length === 1 && entries[0][1] === "") return normalizeRawBody(entries[0][0]);
+    return new URLSearchParams(rawBody).toString();
+  }
+  return String(rawBody).replace(/\\t/g, "\t").replace(/\r\n/g, "\n").trim();
 }
 
 /**
  * Handle ADMS getrequest (Command Polling)
  */
-async function handleGetRequest(query) {
-  const { SN, INFO } = query;
-  console.log(`[ADMS Debug] GET Request from SN: ${SN}`);
+async function handleGetRequest(query, body) {
+  const { SN, INFO } = normalizeQuery(query, body);
+  console.log("[ADMS] GET /iclock/getrequest", { SN, query, body });
+
+  if (!SN) {
+    console.warn("[ADMS] getrequest missing SN");
+    return "OK";
+  }
   
   const now = new Date(); // Actual UTC now
   const nepalNow = getNepalTime(now); // Local Display Time for Machine
@@ -79,12 +134,16 @@ async function handleGetRequest(query) {
 
   if (updErr) console.error(`[ADMS Debug] Heartbeat Update Error for ${SN}:`, updErr.message);
 
+  if (!isDeviceTimeSyncEnabled()) {
+    return "OK";
+  }
+
   // 3. Logic to send commands
-  // Only send SETTIME if never synced or synced > 1 hour ago
-  const oneHourAgo = new Date(now.getTime() - 3600000);
+  // Only send SETTIME if never synced or synced after configured interval.
+  const syncCutoff = new Date(now.getTime() - getDeviceTimeSyncIntervalMs());
   const lastSync = device?.last_synced_at ? new Date(device.last_synced_at) : null;
 
-  if (!lastSync || lastSync < oneHourAgo) {
+  if (!lastSync || lastSync < syncCutoff) {
     // We use UTC methods on the nepalNow object because it already has the +5:45 added
     const year = nepalNow.getUTCFullYear();
     const month = String(nepalNow.getUTCMonth() + 1).padStart(2, '0');
@@ -102,7 +161,7 @@ async function handleGetRequest(query) {
       .update({ last_synced_at: now.toISOString() })
       .eq("serial_number", SN);
 
-    console.log(`[ADMS Debug] Syncing Nepal Time: ${serverTime}. Sending Command: ${setTimeCmd.trim()}`);
+    console.log(`[ADMS] Sending SETTIME to ${SN}: ${serverTime}`);
     return setTimeCmd;
   }
 
@@ -115,10 +174,15 @@ async function handleGetRequest(query) {
  * The device tells us if the command was successful.
  */
 async function handleDeviceCmd(query, rawBody) {
-  const { SN } = query;
-  console.log(`[ADMS Debug] Command ACK from SN: ${SN}`);
-  console.log(`[ADMS Debug] ACK Body:\n${rawBody}`);
+  const { SN } = normalizeQuery(query, rawBody);
+  console.log("[ADMS] POST /iclock/devicecmd", { SN, body: normalizeRawBody(rawBody) });
   
+  return "OK";
+}
+
+async function handleGetCData(query, body) {
+  const { SN, table } = normalizeQuery(query, body);
+  console.log("[ADMS] GET /iclock/cdata", { SN, table, query, body });
   return "OK";
 }
 
@@ -126,14 +190,20 @@ async function handleDeviceCmd(query, rawBody) {
  * Handle ADMS cdata (Data Push)
  */
 async function handlePostData(query, rawBody) {
-  const { SN, table } = query;
-  console.log(`[ADMS Debug] POST Request - SN: ${SN}, Table: ${table}`);
+  const { SN, table } = normalizeQuery(query, rawBody);
+  const bodyText = normalizeRawBody(rawBody);
+  console.log("[ADMS] POST /iclock/cdata", { SN, table, bytes: Buffer.byteLength(bodyText) });
   
-  if (table !== "ATTLOG") {
+  if (!SN) {
+    console.warn("[ADMS] cdata missing SN");
     return "OK";
   }
 
-  console.log(`[ADMS Debug] Raw Body Received:\n${rawBody}`);
+  if (String(table || "").toUpperCase() !== "ATTLOG") {
+    return "OK";
+  }
+
+  console.log(`[ADMS] ATTLOG body from ${SN}:\n${bodyText}`);
 
   // 1. Resolve Device & Org
   const { data: device, error: devError } = await supabaseAdmin
@@ -147,60 +217,104 @@ async function handlePostData(query, rawBody) {
     return "OK";
   }
 
-  const lines = rawBody.trim().split("\n");
+  const lines = bodyText.split("\n");
 
   for (const line of lines) {
-    if (!line.trim()) continue;
-    
-    const parts = line.split("\t");
-    if (parts.length < 2) continue;
-
-    const deviceUserId = parts[0].trim();
-    const punchTimeStr = parts[1].trim(); // "2026-05-17 18:03:57" (Nepal Time)
-    const verifyModeRaw = parts[2]?.trim();
-    
-    // Convert machine local time to UTC for DB storage
-    const punchTimeUTC = deviceTimeToUTC(punchTimeStr);
-
-    let verificationMode = "finger";
-    if (verifyModeRaw === "1" || verifyModeRaw === "finger") verificationMode = "finger";
-    if (verifyModeRaw === "15" || verifyModeRaw === "face") verificationMode = "face";
-    if (verifyModeRaw === "4") verificationMode = "card";
-    if (verifyModeRaw === "3") verificationMode = "pin";
-
-    // 2. Store Raw Log
-    const { data: rawLog, error: logError } = await supabaseAdmin
-      .from("biometric_raw_logs")
-      .insert({
-        org_id: device.org_id,
-        device_id: device.id,
-        device_user_id: deviceUserId,
-        punch_time: punchTimeUTC.toISOString(), 
-        verification_mode: verificationMode,
-        processing_status: "pending",
-        raw_payload: { raw_line: line.trim(), sn: SN }
-      })
-      .select("id")
-      .single();
-
-    if (logError) {
-      console.error("[ADMS Debug] DB Error saving raw log:", logError.message);
-      continue;
-    }
-
-    // 3. Process the Punch
     try {
+      if (!line.trim()) continue;
+
+      const parts = line.includes("\t") ? line.split("\t") : line.trim().split(/\s+/);
+      if (parts.length < 2) {
+        console.warn(`[ADMS] Ignoring malformed ATTLOG line from ${SN}: ${line}`);
+        continue;
+      }
+
+      const deviceUserId = parts[0].trim();
+      const punchTimeStr = parts.length >= 3 && /^\d{2}:\d{2}:\d{2}$/.test(parts[2])
+        ? `${parts[1].trim()} ${parts[2].trim()}`
+        : parts[1].trim();
+      const verifyModeRaw = parts.length >= 3 && /^\d{2}:\d{2}:\d{2}$/.test(parts[2])
+        ? parts[3]?.trim()
+        : parts[2]?.trim();
+
+      const punchTimeUTC = deviceTimeToUTC(punchTimeStr);
+      if (!punchTimeUTC) {
+        console.warn(`[ADMS] Ignoring ATTLOG line with invalid time from ${SN}: ${line}`);
+        continue;
+      }
+
+      const ageHours = (Date.now() - punchTimeUTC.getTime()) / (1000 * 60 * 60);
+      if (ageHours > DELAYED_LOG_THRESHOLD_HOURS) {
+        console.log(`[ADMS] Delayed biometric log accepted`, {
+          SN,
+          deviceUserId,
+          punchTime: punchTimeUTC.toISOString(),
+          ageHours: Math.round(ageHours),
+        });
+      }
+
+      let verificationMode = "finger";
+      if (verifyModeRaw === "1" || verifyModeRaw === "finger") verificationMode = "finger";
+      if (verifyModeRaw === "15" || verifyModeRaw === "face") verificationMode = "face";
+      if (verifyModeRaw === "4") verificationMode = "card";
+      if (verifyModeRaw === "3") verificationMode = "pin";
+
+      const duplicateRawLog = await findDuplicateRawLog(device.id, deviceUserId, punchTimeUTC);
+      if (duplicateRawLog) {
+        console.log("[ADMS] Duplicate biometric punch ignored", {
+          SN,
+          deviceUserId,
+          punchTime: punchTimeUTC.toISOString(),
+          rawLogId: duplicateRawLog.id,
+        });
+        continue;
+      }
+
+      // 2. Store Raw Log
+      const { data: rawLog, error: logError } = await supabaseAdmin
+        .from("biometric_raw_logs")
+        .insert({
+          org_id: device.org_id,
+          device_id: device.id,
+          device_user_id: deviceUserId,
+          punch_time: punchTimeUTC.toISOString(), 
+          verification_mode: verificationMode,
+          processing_status: "pending",
+          raw_payload: { raw_line: line.trim(), sn: SN }
+        })
+        .select("id")
+        .single();
+
+      if (logError) {
+        console.error("[ADMS] DB error saving raw log:", logError.message);
+        continue;
+      }
+
+      // 3. Process the Punch
       await processBiometricPunch(rawLog.id, device.org_id, deviceUserId, punchTimeUTC, device.workplace_id);
     } catch (err) {
-      console.error(`[ADMS Debug] Punch Processing Error:`, err.message);
-      await supabaseAdmin
-        .from("biometric_raw_logs")
-        .update({ processing_status: "error", error_reason: err.message })
-        .eq("id", rawLog.id);
+      console.error("[ADMS] Punch line processing error:", err.message);
     }
   }
 
   return "OK";
+}
+
+async function findDuplicateRawLog(deviceId, deviceUserId, punchTimeUTC) {
+  const { data, error } = await supabaseAdmin
+    .from("biometric_raw_logs")
+    .select("id")
+    .eq("device_id", deviceId)
+    .eq("device_user_id", deviceUserId)
+    .eq("punch_time", punchTimeUTC.toISOString())
+    .maybeSingle();
+
+  if (error) {
+    console.error("[ADMS] Duplicate raw log lookup failed:", error.message);
+    return null;
+  }
+
+  return data;
 }
 
 /**
@@ -226,7 +340,8 @@ async function processBiometricPunch(rawLogId, orgId, deviceUserId, punchTimeUTC
   const dateAd = punchTimeUTC.toISOString().split("T")[0];
   const dateBs = adToBs(dateAd);
 
-  // 2. Attendance Upsert Logic (Check-in / Check-out)
+  // 2. Attendance upsert logic. Delayed logs are accepted: the earliest punch
+  // becomes check-in, and the latest punch becomes check-out.
   const { data: existing } = await supabaseAdmin
     .from("attendance")
     .select("id, check_in_time, check_out_time")
@@ -258,18 +373,56 @@ async function processBiometricPunch(rawLogId, orgId, deviceUserId, punchTimeUTC
     attendanceId = newAtt.id;
   } else {
     attendanceId = existing.id;
-    const checkInTime = new Date(existing.check_in_time);
-    const workingMinutes = Math.round((punchTimeUTC - checkInTime) / (1000 * 60));
+    const existingCheckIn = existing.check_in_time ? new Date(existing.check_in_time) : null;
+    const existingCheckOut = existing.check_out_time ? new Date(existing.check_out_time) : null;
+    const punchIso = punchTimeUTC.toISOString();
 
-    const { error: updError } = await supabaseAdmin
-      .from("attendance")
-      .update({
-        check_out_time: punchTimeUTC.toISOString(),
-        working_minutes: Math.max(0, workingMinutes)
-      })
-      .eq("id", existing.id);
-    
-    if (updError) throw updError;
+    if (
+      (existingCheckIn && existingCheckIn.getTime() === punchTimeUTC.getTime()) ||
+      (existingCheckOut && existingCheckOut.getTime() === punchTimeUTC.getTime())
+    ) {
+      console.log("[ADMS] Duplicate attendance punch ignored", {
+        employeeId: employee.id,
+        punchTime: punchIso,
+      });
+    } else {
+      const patch = {};
+      const nextCheckIn = !existingCheckIn || punchTimeUTC < existingCheckIn
+        ? punchTimeUTC
+        : existingCheckIn;
+      const nextCheckOut = !existingCheckOut || punchTimeUTC > existingCheckOut
+        ? punchTimeUTC
+        : existingCheckOut;
+
+      if (!existingCheckIn || nextCheckIn.getTime() !== existingCheckIn.getTime()) {
+        patch.check_in_time = nextCheckIn.toISOString();
+      }
+
+      if (
+        nextCheckOut &&
+        nextCheckIn &&
+        nextCheckOut.getTime() !== nextCheckIn.getTime() &&
+        (!existingCheckOut || nextCheckOut.getTime() !== existingCheckOut.getTime())
+      ) {
+        patch.check_out_time = nextCheckOut.toISOString();
+      }
+
+      const workingMinutes = nextCheckIn && nextCheckOut && nextCheckOut > nextCheckIn
+        ? Math.round((nextCheckOut - nextCheckIn) / (1000 * 60))
+        : null;
+      if (workingMinutes !== null) {
+        patch.working_minutes = Math.max(0, workingMinutes);
+      }
+
+      if (Object.keys(patch).length > 0) {
+        const { error: updError } = await supabaseAdmin
+          .from("attendance")
+          .update(patch)
+          .eq("id", existing.id);
+
+        if (updError) throw updError;
+      }
+    }
   }
 
   // 3. Mark raw log as processed
@@ -431,6 +584,7 @@ async function assignBiometricId(userId, employeeId, requestedId = null) {
 
 module.exports = {
   handleGetRequest,
+  handleGetCData,
   handlePostData,
   handleDeviceCmd,
   listDevices,

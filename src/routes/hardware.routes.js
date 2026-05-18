@@ -6,15 +6,6 @@ const { checkSuspension } = require("../middleware/checkSuspension");
 const { requireStaffRole } = require("../middleware/requireStaffRole");
 
 /**
- * ADMS (Push SDK) Endpoints
- * These MUST be at /iclock/... and do NOT use standard Bearer Auth
- */
-router.get("/getrequest", hardwareController.getRequest);
-router.post("/cdata", hardwareController.postData);
-router.get("/cdata", hardwareController.getCData);
-router.post("/devicecmd", hardwareController.deviceCmd); // Added acknowledgment route
-
-/**
  * Standard API Management Endpoints
  * These are called by the frontend (Dashboard)
  */

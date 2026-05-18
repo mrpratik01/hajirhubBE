@@ -1,4 +1,5 @@
 const express = require("express");
+const cors = require("cors");
 const usersRoutes = require("./routes/users.routes");
 const adminPlansRoutes = require("./routes/admin.plans.routes");
 const organizationsRoutes = require("./routes/organizations.routes");
@@ -14,35 +15,57 @@ const leavesRoutes = require("./routes/leaves.routes");
 const payrollRoutes = require("./routes/payroll.routes");
 const reportsRoutes = require("./routes/reports.routes");
 const hardwareRoutes = require("./routes/hardware.routes");
+const iclockRoutes = require("./routes/iclock.routes");
 const userManagementRoutes = require("./routes/userManagement.routes");
+
+function parseCorsOrigins(value) {
+  return String(value || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+function createCorsOptions() {
+  const configuredOrigins = parseCorsOrigins(process.env.CORS_ORIGIN);
+  const allowAllInDevelopment = configuredOrigins.length === 0 && process.env.NODE_ENV !== "production";
+
+  return {
+    credentials: true,
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      if (allowAllInDevelopment) return callback(null, true);
+      if (configuredOrigins.includes(origin)) return callback(null, true);
+      return callback(new Error(`CORS origin not allowed: ${origin}`));
+    },
+  };
+}
+
+function isDeviceTextBody(req) {
+  const contentType = req.headers["content-type"];
+  if (!contentType) return true;
+  return contentType.startsWith("text/plain") || contentType.startsWith("application/octet-stream");
+}
 
 function createApp() {
   const app = express();
 
   app.disable("x-powered-by");
 
-  const corsOrigin = process.env.CORS_ORIGIN || "*";
-  app.use((req, res, next) => {
-    res.setHeader("Access-Control-Allow-Origin", corsOrigin);
-    res.setHeader("Access-Control-Allow-Methods", "GET,PUT,POST,PATCH,DELETE,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    if (req.method === "OPTIONS") {
-      return res.sendStatus(204);
-    }
-    return next();
-  });
+  app.use(cors(createCorsOptions()));
+  app.options(/.*/, cors(createCorsOptions()));
 
   // Special raw text parser for ADMS Biometric devices
-  // We use */* to ensure we catch the body regardless of what Content-Type the device sends
-  app.use("/iclock", express.text({ type: "*/*", limit: "1mb" }));
+  app.use("/iclock", express.text({ type: isDeviceTextBody, limit: "10mb" }));
 
-  app.use(express.json({ limit: "1mb" }));
-  app.use(express.urlencoded({ extended: true, limit: "1mb" }));
-  app.use(express.text({ type: "text/plain", limit: "1mb" }));
+  app.use(express.json({ limit: "10mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+  app.use(express.text({ type: ["text/plain", "application/octet-stream"], limit: "10mb" }));
 
   app.get("/health", (req, res) => {
-    res.json({ ok: true });
+    res.json({ status: "OK", time: new Date().toISOString() });
   });
+
+  app.use("/iclock", iclockRoutes);
 
   app.use("/api/users/management", userManagementRoutes);
   app.use("/api/users", usersRoutes);
@@ -59,10 +82,30 @@ function createApp() {
   app.use("/api/leaves", leavesRoutes);
   app.use("/api/payroll", payrollRoutes);
   app.use("/api/reports", reportsRoutes);
-  app.use("/iclock", hardwareRoutes);
+  app.use("/api/hardware", hardwareRoutes);
 
   app.use((req, res) => {
     res.status(404).json({ error: "Not found" });
+  });
+
+  app.use((err, req, res, next) => {
+    console.error("[GlobalError]", {
+      method: req.method,
+      path: req.originalUrl,
+      message: err.message,
+      stack: process.env.NODE_ENV === "production" ? undefined : err.stack,
+    });
+
+    if (req.path.startsWith("/iclock")) {
+      return res.status(200).send("OK");
+    }
+
+    if (res.headersSent) return next(err);
+
+    const status = err.status || err.statusCode || 500;
+    return res.status(status).json({
+      error: status >= 500 ? "Internal server error" : err.message,
+    });
   });
 
   return app;

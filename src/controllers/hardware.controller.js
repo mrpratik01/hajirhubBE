@@ -1,13 +1,27 @@
 const hardwareService = require("../services/hardware.service");
 const { handleError } = require("../middleware/errorHandler");
 
+function normalizeDeviceBody(body) {
+  if (!body) return "";
+  if (Buffer.isBuffer(body)) return body.toString("utf8");
+  if (typeof body === "string") return body;
+  if (typeof body === "object") {
+    const entries = Object.entries(body);
+    if (entries.length === 1 && entries[0][1] === "") return entries[0][0];
+    const values = Object.values(body);
+    if (values.length === 1 && typeof values[0] === "string") return values[0];
+    return new URLSearchParams(body).toString();
+  }
+  return String(body);
+}
+
 /**
  * GET /iclock/getrequest
  * Device polls for commands.
  */
 async function getRequest(req, res) {
   try {
-    const response = await hardwareService.handleGetRequest(req.query);
+    const response = await hardwareService.handleGetRequest(req.query, req.body);
     return res.send(response);
   } catch (err) {
     console.error("[HardwareController] getRequest error:", err);
@@ -35,7 +49,13 @@ async function postData(req, res) {
  * Basic device check-in.
  */
 async function getCData(req, res) {
-  return res.send("OK");
+  try {
+    const response = await hardwareService.handleGetCData(req.query, req.body);
+    return res.send(response);
+  } catch (err) {
+    console.error("[HardwareController] getCData error:", err);
+    return res.send("OK");
+  }
 }
 
 // ─── API Management ──────────────────────────────────────────────────────────
@@ -93,7 +113,7 @@ async function assignBiometricId(req, res) {
  */
 async function deviceCmd(req, res) {
   try {
-    const response = await hardwareService.handleDeviceCmd(req.query, req.body);
+    const response = await hardwareService.handleDeviceCmd(req.query, normalizeDeviceBody(req.body));
     return res.send(response);
   } catch (err) {
     console.error("[HardwareController] deviceCmd error:", err);

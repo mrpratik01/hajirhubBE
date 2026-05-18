@@ -5,19 +5,32 @@ const ZK_TCP_PORT = 4370;
 const ZK_TIMEOUT_MS = 10000;
 const ZK_INPORT = 4000;
 const NEPAL_OFFSET_MINUTES = 5 * 60 + 45;
-const DEFAULT_SYNC_INTERVAL_MS = 30 * 1000;
+const DEFAULT_SYNC_INTERVAL_HOURS = 6;
 const CMD_SET_TIME = 202;
 
 let intervalHandle = null;
 let isSyncRunning = false;
 
 function getSyncIntervalMs() {
-  const configured = Number(process.env.DEVICE_TIME_SYNC_INTERVAL_MS);
-  if (Number.isFinite(configured) && configured >= 10000) {
-    return configured;
+  const configuredHours = Number(process.env.DEVICE_TIME_SYNC_INTERVAL_HOURS);
+  const hours = Number.isFinite(configuredHours) && configuredHours > 0
+    ? configuredHours
+    : DEFAULT_SYNC_INTERVAL_HOURS;
+
+  return hours * 60 * 60 * 1000;
+}
+
+function isDeviceTimeSyncEnabled() {
+  return String(process.env.ENABLE_DEVICE_TIME_SYNC || "false").toLowerCase() === "true";
+}
+
+function formatHours(ms) {
+  const hours = ms / (60 * 60 * 1000);
+  if (Number.isInteger(hours)) {
+    return `${hours} hour${hours === 1 ? "" : "s"}`;
   }
 
-  return DEFAULT_SYNC_INTERVAL_MS;
+  return `${Math.round(hours * 100) / 100} hours`;
 }
 
 function getNepalTimeParts(date = new Date()) {
@@ -128,6 +141,11 @@ async function syncOnlineDeviceTimes() {
 }
 
 function startDeviceTimeSyncScheduler() {
+  if (!isDeviceTimeSyncEnabled()) {
+    console.log("[DeviceTimeSync] Scheduled device time sync disabled.");
+    return null;
+  }
+
   if (intervalHandle) {
     return intervalHandle;
   }
@@ -135,7 +153,7 @@ function startDeviceTimeSyncScheduler() {
   const syncIntervalMs = getSyncIntervalMs();
 
   console.log(
-    `[DeviceTimeSync] Starting scheduled Nepal time sync every ${Math.round(syncIntervalMs / 1000)} seconds.`
+    `[DeviceTimeSync] Starting scheduled Nepal time sync every ${formatHours(syncIntervalMs)}.`
   );
   void syncOnlineDeviceTimes();
 
