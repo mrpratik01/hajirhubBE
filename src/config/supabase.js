@@ -1,5 +1,6 @@
 // src/config/supabase.js
 const { createClient } = require("@supabase/supabase-js");
+const ws = require("ws");
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const anonKey = process.env.SUPABASE_ANON_KEY;
@@ -9,16 +10,27 @@ if (!supabaseUrl || !anonKey || !serviceRoleKey) {
   throw new Error("Missing SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY in .env");
 }
 
-// Admin (bypasses RLS). Use carefully.
-const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
+const supabaseOptions = {
+  realtime: {
+    transport: ws,
+  },
+};
 
-// Verify JWTs from the frontend (auth.getUser)
-const supabaseAnon = createClient(supabaseUrl, anonKey);
+// Admin
+const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, supabaseOptions);
 
-// User-scoped (RLS enforced) for DB queries using the user's JWT
+// Verify JWTs
+const supabaseAnon = createClient(supabaseUrl, anonKey, supabaseOptions);
+
+// User scoped
 function supabaseForUser(accessToken) {
   return createClient(supabaseUrl, anonKey, {
-    global: { headers: { Authorization: `Bearer ${accessToken}` } },
+    ...supabaseOptions,
+    global: {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    },
   });
 }
 
