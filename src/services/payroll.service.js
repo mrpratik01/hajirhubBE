@@ -1,5 +1,9 @@
 const { supabaseAdmin } = require("../config/supabase");
-const { todayBs, getDaysInBsMonth } = require("../utils/nepaliDate");
+const { todayBs, getDaysInBsMonth, bsToAd, getNepalDateAd } = require("../utils/nepaliDate");
+const {
+  enumerateBsRange,
+  buildEmployeeCalendar,
+} = require("./workCalendar.service");
 
 /**
  * Resolve organization ID from user ID.
@@ -147,45 +151,17 @@ function calculateAnnualTDS(taxableIncome, slabs) {
 }
 
 /**
- * Aggregate attendance stats for an employee in a BS month.
- */
-async function getAttendanceStats(orgId, employeeId, monthBs) {
-  // monthBs format: "2082-08"
-  const { data, error } = await supabaseAdmin
-    .from("attendance")
-    .select("status")
-    .eq("org_id", orgId)
-    .eq("employee_id", employeeId)
-    .like("date_bs", `${monthBs}-%`);
-
-  if (error) throw error;
-
-  const stats = {
-    present: 0,
-    late: 0,
-    half_day: 0,
-    absent: 0,
-    leave: 0,
-    holiday: 0,
-    weekend: 0,
-  };
-
-  data.forEach((row) => {
-    if (stats[row.status] !== undefined) {
-      stats[row.status]++;
-    }
-  });
-
-  return stats;
-}
-
-/**
  * The Orchestrator: Generate a payroll run.
  */
 async function generatePayrollRun(userId, monthBs) {
   const orgId = await resolveOrgId(userId);
   const [bsYear, bsMonth] = monthBs.split("-").map(Number);
   const daysInMonth = getDaysInBsMonth(bsYear, bsMonth);
+  const startDateBs = `${monthBs}-01`;
+  const endDateBs = `${monthBs}-${String(daysInMonth).padStart(2, "0")}`;
+  const startDateAd = bsToAd(startDateBs);
+  const endDateAd = bsToAd(endDateBs);
+  const allDates = enumerateBsRange(startDateBs, endDateBs);
 
   // 1. Fetch Config
   const config = await getPayrollConfig(userId);
@@ -196,6 +172,7 @@ async function generatePayrollRun(userId, monthBs) {
     .from("employees")
     .select(`
       *,
+      shift:shift_id(id, name, start_time, end_time, working_days),
       allowances:employee_allowances(*)
     `)
     .eq("org_id", orgId)
@@ -207,25 +184,48 @@ async function generatePayrollRun(userId, monthBs) {
   // 3. Fetch System TDS Slabs
   const slabsSingle = await getTdsSlabs(bsYear, "single");
   const slabsCouple = await getTdsSlabs(bsYear, "couple");
+  const calendar = await buildEmployeeCalendar({
+    orgId,
+    employees,
+    allDates,
+    startDateBs,
+    endDateBs,
+    startDateAd,
+    endDateAd,
+    todayAd: getNepalDateAd(),
+  });
 
   const runItems = [];
-  let totalGross = 0, totalNet = 0;
+  let totalBasic = 0, totalAllowancesAgg = 0, totalGross = 0, totalNet = 0;
+  let totalSsfEmployee = 0, totalSsfEmployer = 0, totalSst = 0, totalTds = 0, totalAdvancesAgg = 0;
 
   for (const emp of employees) {
-    // A. Attendance stats
-    const stats = await getAttendanceStats(orgId, emp.id, monthBs);
-    
-    // Proration logic (Working Day basis)
-    // We assume 30 days or daysInMonth for simple proration if shift info is missing,
-    // but here we use actual attendance + holidays + leaves.
-    const paidDays = stats.present + stats.late + (stats.half_day * 0.5) + stats.leave + stats.holiday + stats.weekend;
-    const prorationRatio = Math.min(1, paidDays / daysInMonth);
+    const empCalendar = calendar.byEmployee.get(emp.id);
+    const stats = empCalendar?.stats || {
+      working_days: 0,
+      present: 0,
+      late: 0,
+      half_day: 0,
+      absent: 0,
+      leave: 0,
+      unpaid_days: 0,
+    };
 
-    const payableBasic = emp.basic_salary * prorationRatio;
-    const allowancesFixed = (emp.hra || 0) + (emp.travel_allowance || 0) + (emp.medical_allowance || 0);
+    const unpaidWorkingDays = Math.min(stats.working_days, stats.unpaid_days);
+    const payableWorkDays = Math.max(0, stats.working_days - unpaidWorkingDays);
+    const prorationRatio = stats.working_days > 0
+      ? Math.min(1, payableWorkDays / stats.working_days)
+      : 0;
+
+    const basicSalary = Number(emp.basic_salary || 0);
+    const hra = Number(emp.hra || 0);
+    const travelAllowance = Number(emp.travel_allowance || 0);
+    const medicalAllowance = Number(emp.medical_allowance || 0);
+    const payableBasic = basicSalary * prorationRatio;
+    const allowancesFixed = hra + travelAllowance + medicalAllowance;
     const allowancesVariable = (emp.allowances || [])
       .filter(a => a.is_active)
-      .reduce((sum, a) => sum + a.amount, 0);
+      .reduce((sum, a) => sum + Number(a.amount || 0), 0);
     
     const totalAllowances = allowancesFixed + allowancesVariable;
     const payableAllowances = totalAllowances * prorationRatio;
@@ -255,7 +255,7 @@ async function generatePayrollRun(userId, monthBs) {
       .eq("employee_id", emp.id)
       .eq("status", "pending");
 
-    const totalAdvances = (advances || []).reduce((sum, a) => sum + a.amount, 0);
+    const totalAdvances = (advances || []).reduce((sum, a) => sum + Number(a.amount || 0), 0);
 
     const totalDeductions = ssfEmployee + sstDeduction + monthlyTDS + totalAdvances;
     const netSalary = grossSalary - totalDeductions;
@@ -263,16 +263,16 @@ async function generatePayrollRun(userId, monthBs) {
     runItems.push({
       employee_id: emp.id,
       org_id: orgId,
-      working_days: daysInMonth,
+      working_days: stats.working_days,
       present_days: stats.present + stats.late,
       absent_days: stats.absent,
       late_days: stats.late,
       half_days: stats.half_day,
       leave_days: stats.leave,
-      basic_salary: emp.basic_salary,
-      hra: emp.hra,
-      travel_allowance: emp.travel_allowance,
-      medical_allowance: emp.medical_allowance,
+      basic_salary: basicSalary,
+      hra,
+      travel_allowance: travelAllowance,
+      medical_allowance: medicalAllowance,
       other_allowances: allowancesVariable,
       payable_basic: payableBasic,
       payable_allowances: payableAllowances,
@@ -292,6 +292,13 @@ async function generatePayrollRun(userId, monthBs) {
 
     totalGross += grossSalary;
     totalNet += netSalary;
+    totalBasic += payableBasic;
+    totalAllowancesAgg += payableAllowances;
+    totalSsfEmployee += ssfEmployee;
+    totalSsfEmployer += ssfEmployer;
+    totalSst += sstDeduction;
+    totalTds += monthlyTDS;
+    totalAdvancesAgg += totalAdvances;
   }
 
   // 4. Save Payroll Run (Draft)
@@ -300,12 +307,19 @@ async function generatePayrollRun(userId, monthBs) {
     .insert({
       org_id: orgId,
       month_bs: monthBs,
-      month_ad: new Date().toISOString().substring(0, 7),
+      month_ad: startDateAd.substring(0, 7),
       bs_year: bsYear,
       bs_month: bsMonth,
       status: "draft",
       employee_count: employees.length,
+      total_basic: totalBasic,
+      total_allowances: totalAllowancesAgg,
       total_gross: totalGross,
+      total_ssf_employee: totalSsfEmployee,
+      total_ssf_employer: totalSsfEmployer,
+      total_sst: totalSst,
+      total_tds: totalTds,
+      total_advances: totalAdvancesAgg,
       total_net: totalNet,
       run_by: userId,
       payroll_config_id: config.id
@@ -328,6 +342,114 @@ async function generatePayrollRun(userId, monthBs) {
   if (itemsError) throw itemsError;
 
   return { run, items: itemsToInsert };
+}
+
+function monthsWorkedForBonus(joinDateBs, bsYear) {
+  if (!joinDateBs) return 12;
+  const [joinYear, joinMonth] = String(joinDateBs).split("-").map(Number);
+  if (!joinYear || !joinMonth) return 12;
+  if (joinYear < bsYear) return 12;
+  if (joinYear > bsYear) return 0;
+  return Math.max(0, Math.min(12, 13 - joinMonth));
+}
+
+async function listFestivalBonuses(userId, query = {}) {
+  const orgId = await resolveOrgId(userId);
+  let q = supabaseAdmin
+    .from("festival_bonuses")
+    .select(`
+      *,
+      employee:employee_id(id, full_name, employee_code, designation)
+    `)
+    .eq("org_id", orgId);
+
+  if (query.status) q = q.eq("status", query.status);
+  if (query.bs_year) q = q.eq("bs_year", parseInt(query.bs_year, 10));
+  if (query.festival_name) q = q.eq("festival_name", query.festival_name);
+
+  const { data, error } = await q.order("created_at", { ascending: false });
+  if (error) throw error;
+  return data;
+}
+
+async function generateFestivalBonuses(userId, body) {
+  const orgId = await resolveOrgId(userId);
+  const config = await getPayrollConfig(userId);
+  if (!config) throw new Error("Payroll configuration not found. Please set it up first.");
+
+  const { festival_name, bs_year, payment_mode = "standalone" } = body;
+  const { data: employees, error: empError } = await supabaseAdmin
+    .from("employees")
+    .select("id, basic_salary, join_date_bs")
+    .eq("org_id", orgId)
+    .eq("status", "active");
+
+  if (empError) throw empError;
+  if (!employees.length) throw new Error("No active employees found.");
+
+  const rows = employees
+    .map((employee) => {
+      const monthsWorked = monthsWorkedForBonus(employee.join_date_bs, bs_year);
+      const calculatedBonus =
+        Number(employee.basic_salary || 0) *
+        Number(config.festival_bonus_months || 1) *
+        (monthsWorked / 12);
+      const finalBonus = Number(calculatedBonus.toFixed(2));
+
+      return {
+        org_id: orgId,
+        employee_id: employee.id,
+        festival_name,
+        bs_year,
+        months_worked: monthsWorked,
+        basic_salary_at_bonus: employee.basic_salary || 0,
+        calculated_bonus: finalBonus,
+        final_bonus: finalBonus,
+        tds_on_bonus: 0,
+        net_bonus: finalBonus,
+        payment_mode,
+        status: "draft",
+      };
+    })
+    .filter((row) => row.months_worked > 0);
+
+  const { data, error } = await supabaseAdmin
+    .from("festival_bonuses")
+    .upsert(rows, { onConflict: "org_id,employee_id,festival_name" })
+    .select(`
+      *,
+      employee:employee_id(id, full_name, employee_code, designation)
+    `);
+
+  if (error) throw error;
+  return data;
+}
+
+async function updateFestivalBonusStatus(userId, bonusId, status) {
+  const orgId = await resolveOrgId(userId);
+  if (!["draft", "finalized", "paid"].includes(status)) {
+    throw new Error("Invalid festival bonus status");
+  }
+
+  const patch = { status };
+  if (status === "finalized" || status === "paid") {
+    patch.finalized_by = userId;
+    patch.finalized_at = new Date().toISOString();
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("festival_bonuses")
+    .update(patch)
+    .eq("id", bonusId)
+    .eq("org_id", orgId)
+    .select(`
+      *,
+      employee:employee_id(id, full_name, employee_code, designation)
+    `)
+    .single();
+
+  if (error) throw error;
+  return data;
 }
 
 async function listRuns(userId) {
@@ -433,6 +555,9 @@ module.exports = {
   createAdvance,
   updateAdvanceStatus,
   getTdsSlabs,
+  listFestivalBonuses,
+  generateFestivalBonuses,
+  updateFestivalBonusStatus,
   generatePayrollRun,
   listRuns,
   getRunDetails,

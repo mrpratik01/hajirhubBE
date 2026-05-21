@@ -1,5 +1,5 @@
 const { supabaseAdmin } = require("../config/supabase");
-const { adToBs } = require("../utils/nepaliDate");
+const { attendanceDatesFromInstant } = require("../utils/nepaliDate");
 
 const NEPAL_OFFSET_MS = (5 * 60 + 45) * 60 * 1000; // 5 hours 45 mins in ms
 const DEFAULT_DEVICE_TIME_SYNC_INTERVAL_HOURS = 6;
@@ -40,9 +40,8 @@ function deviceTimeToUTC(timeStr) {
     return null;
   }
 
-  // Store the device-provided timestamp as a UTC ISO instant. Do not manually
-  // add or subtract the Nepal offset before saving.
-  return new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  const utcMs = Date.UTC(year, month - 1, day, hour, minute, second) - NEPAL_OFFSET_MS;
+  return new Date(utcMs);
 }
 
 function getDeviceTimeSyncIntervalMs() {
@@ -337,8 +336,7 @@ async function processBiometricPunch(rawLogId, orgId, deviceUserId, punchTimeUTC
     return;
   }
 
-  const dateAd = punchTimeUTC.toISOString().split("T")[0];
-  const dateBs = adToBs(dateAd);
+  const { date_ad: dateAd, date_bs: dateBs } = attendanceDatesFromInstant(punchTimeUTC);
 
   // 2. Attendance upsert logic. Delayed logs are accepted: the earliest punch
   // becomes check-in, and the latest punch becomes check-out.

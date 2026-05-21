@@ -20,6 +20,11 @@ router.put("/advances/:id/status", payrollController.updateAdvanceStatus);
 // ─── TDS Slabs ───────────────────────────────────────────────────────────────
 router.get("/tds-slabs", payrollController.getTdsSlabs);
 
+// ─── Festival Bonuses ───────────────────────────────────────────────────────
+router.get("/festival-bonuses", payrollController.listFestivalBonuses);
+router.post("/festival-bonuses/generate", payrollController.generateFestivalBonuses);
+router.put("/festival-bonuses/:id/status", payrollController.updateFestivalBonusStatus);
+
 // ─── Payroll Runs ────────────────────────────────────────────────────────────
 router.get("/runs", payrollController.listRuns);
 router.get("/runs/:id", payrollController.getRunDetails);

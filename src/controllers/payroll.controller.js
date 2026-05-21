@@ -64,6 +64,45 @@ async function getTdsSlabs(req, res) {
   }
 }
 
+async function listFestivalBonuses(req, res) {
+  try {
+    const data = await payrollService.listFestivalBonuses(req.user.id, req.query);
+    return res.json({ data });
+  } catch (err) {
+    return handleError(res, err, "List festival bonuses");
+  }
+}
+
+async function generateFestivalBonuses(req, res) {
+  try {
+    const { festival_name, bs_year, payment_mode } = req.body;
+    if (!festival_name || !bs_year) {
+      return res.status(400).json({ error: "festival_name and bs_year are required" });
+    }
+    const data = await payrollService.generateFestivalBonuses(req.user.id, {
+      festival_name,
+      bs_year: parseInt(bs_year, 10),
+      payment_mode
+    });
+    return res.json({ data });
+  } catch (err) {
+    return handleError(res, err, "Generate festival bonuses");
+  }
+}
+
+async function updateFestivalBonusStatus(req, res) {
+  try {
+    const data = await payrollService.updateFestivalBonusStatus(
+      req.user.id,
+      req.params.id,
+      req.body.status
+    );
+    return res.json({ data });
+  } catch (err) {
+    return handleError(res, err, "Update festival bonus status");
+  }
+}
+
 async function listRuns(req, res) {
   try {
     const data = await payrollService.listRuns(req.user.id);
@@ -118,6 +157,9 @@ module.exports = {
   createAdvance,
   updateAdvanceStatus,
   getTdsSlabs,
+  listFestivalBonuses,
+  generateFestivalBonuses,
+  updateFestivalBonusStatus,
   listRuns,
   getRunDetails,
   generateRun,

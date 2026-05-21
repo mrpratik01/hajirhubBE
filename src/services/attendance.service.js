@@ -1,6 +1,6 @@
 const { supabaseAdmin } = require("../config/supabase");
 const { haversineDistanceM } = require("../utils/haversine");
-const { adToBs, bsToAd, getDaysInBsMonth } = require("../utils/nepaliDate");
+const { adToBs } = require("../utils/nepaliDate");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -9,54 +9,6 @@ const NEPAL_OFFSET_MS = NEPAL_OFFSET_MINUTES * 60 * 1000;
 
 function getNepalDateAd(date = new Date()) {
   return new Date(date.getTime() + NEPAL_OFFSET_MS).toISOString().slice(0, 10);
-}
-
-function assertYmd(value, label) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) {
-    throw new Error(`${label} must be in YYYY-MM-DD format`);
-  }
-}
-
-function addAdDays(dateAd, days) {
-  const [year, month, day] = dateAd.split("-").map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day + days));
-  return date.toISOString().slice(0, 10);
-}
-
-function compareYmd(left, right) {
-  return left.localeCompare(right);
-}
-
-function nextBsDate(dateBs) {
-  const [year, month, day] = dateBs.split("-").map(Number);
-  const daysInMonth = getDaysInBsMonth(year, month);
-  if (day < daysInMonth) {
-    return `${year}-${String(month).padStart(2, "0")}-${String(day + 1).padStart(2, "0")}`;
-  }
-  if (month < 12) return `${year}-${String(month + 1).padStart(2, "0")}-01`;
-  return `${year + 1}-01-01`;
-}
-
-function enumerateBsRange(startDateBs, endDateBs) {
-  const dates = [];
-  let cursor = startDateBs;
-  while (compareYmd(cursor, endDateBs) <= 0) {
-    dates.push({ date_bs: cursor, date_ad: bsToAd(cursor) });
-    cursor = nextBsDate(cursor);
-    if (dates.length > 370) throw new Error("Attendance report date range cannot exceed 370 days");
-  }
-  return dates;
-}
-
-function enumerateAdRange(startDateAd, endDateAd) {
-  const dates = [];
-  let cursor = startDateAd;
-  while (compareYmd(cursor, endDateAd) <= 0) {
-    dates.push({ date_ad: cursor, date_bs: adToBs(cursor) });
-    cursor = addAdDays(cursor, 1);
-    if (dates.length > 370) throw new Error("Attendance report date range cannot exceed 370 days");
-  }
-  return dates;
 }
 
 function nepalDateTimeToUtcIso(dateAd, timeValue) {
@@ -358,7 +310,7 @@ async function uploadSelfie(orgId, employeeId, dateAd, fileBuffer, mimeType = "i
  * FIX: Uses real BS date conversion.
  * FIX: Geofence safely handles null workplace.
  */
-async function checkInEmployee(userId, body, fileBuffer, mimeType) {
+async function  checkInEmployee(userId, body, fileBuffer, mimeType) {
   const { lat, lng, accuracy_m, client_record_id, workplace_id } = body;
 
   console.log("[checkIn] step 1 — resolving employee for userId:", userId);
@@ -672,381 +624,6 @@ async function getMonthlyAttendance(userId, month) {
 }
 
 /**
- * Enhanced monthly attendance report with custom date range filtering.
- * Returns day-by-day breakdown of all employees (present/absent/late/etc.)
- * Supports both single month and custom date ranges.
- * 
- * Query params:
- *   - month: "2082-08" (single month)
- *   - start_date: "2082-08-01" (start of range, BS by default)
- *   - end_date: "2082-08-30" (end of range, BS by default)
- *   - date_mode: "bs" | "ad" (set "ad" when start_date/end_date are AD)
- *   - department_id: filter by department
- *   - status: filter by specific status (present, absent, late, etc.)
- */
-async function getMonthlyAttendanceReport(userId, query = {}) {
-  const orgId = await resolveOrgId(userId);
-
-  let startDateBs, endDateBs, startDateAd, endDateAd, allDates;
-
-  // Determine date range
-  if (query.start_date && query.end_date) {
-    assertYmd(query.start_date, "start_date");
-    assertYmd(query.end_date, "end_date");
-
-    if (compareYmd(query.start_date, query.end_date) > 0) {
-      throw new Error("start_date must be before or equal to end_date");
-    }
-
-    if (query.date_mode === "ad") {
-      startDateAd = query.start_date;
-      endDateAd = query.end_date;
-      allDates = enumerateAdRange(startDateAd, endDateAd);
-      startDateBs = allDates[0].date_bs;
-      endDateBs = allDates[allDates.length - 1].date_bs;
-    } else {
-      startDateBs = query.start_date;
-      endDateBs = query.end_date;
-      allDates = enumerateBsRange(startDateBs, endDateBs);
-      startDateAd = allDates[0].date_ad;
-      endDateAd = allDates[allDates.length - 1].date_ad;
-    }
-  } else if (query.month) {
-    // Single month
-    if (!/^\d{4}-\d{2}$/.test(query.month)) {
-      throw new Error("month must be in YYYY-MM format (BS), e.g. 2082-08");
-    }
-    startDateBs = `${query.month}-01`;
-    const [year, month] = query.month.split("-").map(Number);
-    endDateBs = `${query.month}-${String(getDaysInBsMonth(year, month)).padStart(2, "0")}`;
-    allDates = enumerateBsRange(startDateBs, endDateBs);
-    startDateAd = allDates[0].date_ad;
-    endDateAd = allDates[allDates.length - 1].date_ad;
-  } else {
-    // Default: current BS month
-    const todayAd = getNepalDateAd();
-    const todayBs = adToBs(todayAd);
-    const parts = todayBs.split("-");
-    startDateBs = `${parts[0]}-${parts[1]}-01`;
-    endDateBs = `${parts[0]}-${parts[1]}-${String(getDaysInBsMonth(Number(parts[0]), Number(parts[1]))).padStart(2, "0")}`;
-    allDates = enumerateBsRange(startDateBs, endDateBs);
-    startDateAd = allDates[0].date_ad;
-    endDateAd = allDates[allDates.length - 1].date_ad;
-  }
-
-  // Fetch all active employees with details
-  let employeesQuery = supabaseAdmin
-    .from("employees")
-    .select(`
-      id, employee_code, full_name, full_name_nepali, phone, email,
-      department:department_id(id, name),
-      shift:shift_id(id, name, start_time, end_time),
-      workplace:workplace_id(id, name)
-    `)
-    .eq("org_id", orgId)
-    .eq("status", "active");
-
-  if (query.department_id) {
-    employeesQuery = employeesQuery.eq("department_id", query.department_id);
-  }
-
-  const { data: employees, error: empError } = await employeesQuery;
-  if (empError) throw empError;
-  if (!employees || employees.length === 0) {
-    return {
-      report: {
-        date_range: {
-          start: startDateBs,
-          end: endDateBs,
-          start_ad: startDateAd,
-          end_ad: endDateAd,
-          total_days: allDates.length,
-        },
-        daily_breakdown: [],
-        summary: {
-          total_employees: 0,
-          total_present: 0,
-          total_absent: 0,
-          total_late: 0,
-          total_half_day: 0,
-          total_leave: 0,
-          attendance_rate: "0%",
-          total_working_days: 0,
-        },
-      },
-      employee_summary: [],
-    };
-  }
-
-  const employeeIds = employees.map((e) => e.id);
-
-   // Fetch attendance records for the date range
-  let attendanceQuery = supabaseAdmin
-    .from("attendance")
-    .select(
-      `id, employee_id, date_bs, date_ad, check_in_time, check_out_time,
-       working_minutes, status, geofence_status, is_offline_record,
-       is_manual_correction`
-    )
-    .eq("org_id", orgId)
-    .gte("date_bs", startDateBs)
-    .lte("date_bs", endDateBs)
-    .in("employee_id", employeeIds)
-    .order("date_bs", { ascending: true })
-    .order("employee_id", { ascending: true });
-
-  const validStatuses = ["present", "absent", "late", "half_day", "leave", "holiday", "weekend", "manual", "no_record"];
-  const statusFilter = validStatuses.includes(query.status) ? query.status : null;
-
-  const { data: attendanceRecords, error: attError } = await attendanceQuery;
-  if (attError) throw attError;
-
-  // Fetch approved leave requests for the date range
-  // Convert BS dates to AD for leave_requests (uses AD dates)
-  const { data: leaveRequests, error: leaveError } = await supabaseAdmin
-    .from("leave_requests")
-    .select("employee_id, from_date_ad, to_date_ad, leave_type:leave_type_id(name)")
-    .eq("org_id", orgId)
-    .eq("status", "approved")
-    .lte("from_date_ad", endDateAd)
-    .gte("to_date_ad", startDateAd)
-    .in("employee_id", employeeIds);
-
-  if (leaveError) throw leaveError;
-
-  // Create lookup maps
-  const attendanceMap = new Map();
-  for (const record of attendanceRecords || []) {
-    const key = `${record.employee_id}_${record.date_bs}`;
-    attendanceMap.set(key, record);
-  }
-
-  const leaveMap = new Map();
-  for (const leave of leaveRequests || []) {
-    if (!leaveMap.has(leave.employee_id)) {
-      leaveMap.set(leave.employee_id, []);
-    }
-    leaveMap.get(leave.employee_id).push(leave);
-  }
-
-  // Build daily breakdown
-  const todayAdForReport = getNepalDateAd();
-  const dailyBreakdown = allDates.map(({ date_bs: date, date_ad: dateAd }) => {
-    const dayReport = {
-      date_bs: date,
-      date_ad: dateAd,
-      total_employees: employees.length,
-      present: [],
-      absent: [],
-      late: [],
-      half_day: [],
-      leave: [],
-      holiday: [],
-      weekend: [],
-      manual: [],
-      no_record: [],
-    };
-
-    for (const emp of employees) {
-      const key = `${emp.id}_${date}`;
-      const attendance = attendanceMap.get(key);
-
-      if (attendance) {
-        // Employee has attendance record
-        const employeeData = {
-          employee_id: emp.id,
-          employee_code: emp.employee_code,
-          full_name: emp.full_name,
-          full_name_nepali: emp.full_name_nepali,
-          department: emp.department?.name || null,
-          shift: emp.shift?.name || null,
-          attendance_id: attendance.id,
-          check_in_time: attendance.check_in_time,
-          check_out_time: attendance.check_out_time,
-          working_minutes: attendance.working_minutes || 0,
-          geofence_status: attendance.geofence_status,
-          is_offline_record: attendance.is_offline_record,
-          is_manual_correction: attendance.is_manual_correction,
-        };
-
-        // Categorize by status
-        const statusKey = attendance.status === "present" ? "present" :
-                         attendance.status === "absent" ? "absent" :
-                         attendance.status === "late" ? "late" :
-                         attendance.status === "half_day" ? "half_day" :
-                         attendance.status === "leave" ? "leave" :
-                         attendance.status === "holiday" ? "holiday" :
-                         attendance.status === "weekend" ? "weekend" :
-                         attendance.status === "manual" ? "manual" : "no_record";
-
-        dayReport[statusKey].push(employeeData);
-      } else {
-        if (compareYmd(dateAd, todayAdForReport) > 0) {
-          dayReport.no_record.push({
-            employee_id: emp.id,
-            employee_code: emp.employee_code,
-            full_name: emp.full_name,
-            full_name_nepali: emp.full_name_nepali,
-            department: emp.department?.name || null,
-            shift: emp.shift?.name || null,
-            attendance_id: null,
-            reason: "Upcoming date",
-          });
-          continue;
-        }
-
-        // No attendance record - check if on leave
-        const empLeaves = leaveMap.get(emp.id) || [];
-        const activeLeave = empLeaves.find((leave) =>
-          compareYmd(leave.from_date_ad, dateAd) <= 0 &&
-          compareYmd(leave.to_date_ad, dateAd) >= 0
-        );
-
-        if (activeLeave) {
-          dayReport.leave.push({
-            employee_id: emp.id,
-            employee_code: emp.employee_code,
-            full_name: emp.full_name,
-            full_name_nepali: emp.full_name_nepali,
-            department: emp.department?.name || null,
-            shift: emp.shift?.name || null,
-            attendance_id: null,
-            leave_reason: activeLeave.leave_type?.name || "On approved leave",
-          });
-        } else {
-          // Check if weekend (simplified - no shift means no work day)
-          if (!emp.shift) {
-            dayReport.no_record.push({
-              employee_id: emp.id,
-              employee_code: emp.employee_code,
-              full_name: emp.full_name,
-              full_name_nepali: emp.full_name_nepali,
-              department: emp.department?.name || null,
-              shift: emp.shift?.name || null,
-              attendance_id: null,
-              reason: "No shift assigned",
-            });
-          } else {
-            dayReport.absent.push({
-              employee_id: emp.id,
-              employee_code: emp.employee_code,
-              full_name: emp.full_name,
-              full_name_nepali: emp.full_name_nepali,
-              department: emp.department?.name || null,
-              shift: emp.shift?.name || null,
-              attendance_id: null,
-              reason: "No check-in record",
-            });
-          }
-        }
-      }
-    }
-
-    if (statusFilter) {
-      for (const key of validStatuses) {
-        if (key !== statusFilter && Array.isArray(dayReport[key])) {
-          dayReport[key] = [];
-        }
-      }
-    }
-
-    return dayReport;
-  });
-
-  // Calculate summary statistics
-  let totalPresent = 0;
-  let totalAbsent = 0;
-  let totalLate = 0;
-  let totalHalfDay = 0;
-  let totalLeave = 0;
-  let totalRecords = 0;
-
-  for (const day of dailyBreakdown) {
-    totalPresent += day.present.length;
-    totalAbsent += day.absent.length;
-    totalLate += day.late.length;
-    totalHalfDay += day.half_day.length;
-    totalLeave += day.leave.length;
-    totalRecords += day.present.length + day.absent.length + day.late.length + day.half_day.length + day.leave.length;
-  }
-
-  const totalAttendanceDays = totalPresent + totalLate + totalHalfDay;
-  const attendanceRate = totalRecords > 0
-    ? ((totalAttendanceDays / totalRecords) * 100).toFixed(1)
-    : "0";
-
-  const report = {
-    date_range: {
-      start: startDateBs,
-      end: endDateBs,
-      start_ad: startDateAd,
-      end_ad: endDateAd,
-      total_days: allDates.length,
-    },
-    daily_breakdown: dailyBreakdown,
-    summary: {
-      total_employees: employees.length,
-      total_present: totalPresent,
-      total_absent: totalAbsent,
-      total_late: totalLate,
-      total_half_day: totalHalfDay,
-      total_leave: totalLeave,
-      attendance_rate: `${attendanceRate}%`,
-      total_working_days: totalRecords,
-      present_count: totalPresent,
-      absent_count: totalAbsent,
-      late_count: totalLate,
-      half_day_count: totalHalfDay,
-      leave_count: totalLeave,
-    },
-  };
-
-  // Also provide employee-wise summary from the final daily breakdown so
-  // generated absences and leave days are counted alongside stored records.
-  const employeeSummary = employees.map((emp) => {
-    let empPresent = 0;
-    let empAbsent = 0;
-    let empLate = 0;
-    let empHalfDay = 0;
-    let empLeave = 0;
-
-    for (const day of dailyBreakdown) {
-      if (day.present.some((entry) => entry.employee_id === emp.id)) empPresent++;
-      if (day.absent.some((entry) => entry.employee_id === emp.id)) empAbsent++;
-      if (day.late.some((entry) => entry.employee_id === emp.id)) empLate++;
-      if (day.half_day.some((entry) => entry.employee_id === emp.id)) empHalfDay++;
-      if (day.leave.some((entry) => entry.employee_id === emp.id)) empLeave++;
-    }
-
-    const totalDays = empPresent + empAbsent + empLate + empHalfDay + empLeave;
-    const attendanceRate = totalDays > 0
-      ? (((empPresent + empLate + empHalfDay) / totalDays) * 100).toFixed(1)
-      : "0";
-
-    return {
-      employee_id: emp.id,
-      employee_code: emp.employee_code,
-      full_name: emp.full_name,
-      full_name_nepali: emp.full_name_nepali,
-      department: emp.department?.name || null,
-      shift: emp.shift?.name || null,
-      workplace: emp.workplace?.name || null,
-      present: empPresent,
-      absent: empAbsent,
-      late: empLate,
-      half_day: empHalfDay,
-      leave: empLeave,
-      attendance_rate: `${attendanceRate}%`,
-    };
-  });
-
-  return {
-    report,
-    employee_summary: employeeSummary,
-  };
-}
-
-/**
  * Attendance history for a single employee — owner/HR.
  */
 async function getEmployeeAttendance(userId, employeeId, query = {}) {
@@ -1112,6 +689,7 @@ async function manualCorrection(userId, attendanceId, body) {
 
   const {
     employee_id,
+    date_bs,
     date_ad,
     check_in_time,
     check_out_time,
@@ -1171,13 +749,13 @@ async function manualCorrection(userId, attendanceId, body) {
   let query = supabaseAdmin.from("attendance");
 
   if (isNew) {
-    if (!employee_id || !recordDateAd) {
-      throw new Error("employee_id and date_ad are required for new corrections");
+    if (!employee_id || !date_bs || !recordDateAd) {
+      throw new Error("employee_id, date_bs and date_ad are required for new corrections");
     }
     
     // For new records, we need some defaults
     patch.employee_id = employee_id;
-    patch.date_bs = adToBs(recordDateAd);
+    patch.date_bs = date_bs;
     patch.date_ad = recordDateAd;
     if (!patch.status) patch.status = "present";
 
@@ -1189,11 +767,6 @@ async function manualCorrection(userId, attendanceId, body) {
     if (error) throw error;
     return data?.[0];
   } else {
-    if (recordDateAd && Object.prototype.hasOwnProperty.call(body, "date_ad")) {
-      patch.date_ad = recordDateAd;
-      patch.date_bs = adToBs(recordDateAd);
-    }
-
     // Standard update by ID
     const { data, error } = await query
       .update(patch)
@@ -1302,7 +875,6 @@ module.exports = {
   qrCheckInEmployee,
   getTodayAttendance,
   getMonthlyAttendance,
-  getMonthlyAttendanceReport,
   getEmployeeAttendance,
   getMyAttendance,
   manualCorrection,

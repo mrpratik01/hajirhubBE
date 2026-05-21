@@ -1,6 +1,8 @@
 const NepaliDateModule = require("nepali-date-converter");
 
 const NepaliDate = NepaliDateModule.default || NepaliDateModule;
+const NEPAL_OFFSET_MINUTES = 5 * 60 + 45;
+const NEPAL_OFFSET_MS = NEPAL_OFFSET_MINUTES * 60 * 1000;
 
 function assertDateString(value, label) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) {
@@ -16,12 +18,24 @@ function formatAdDate(date) {
   ].join("-");
 }
 
+function formatUtcDate(date) {
+  return [
+    date.getUTCFullYear(),
+    String(date.getUTCMonth() + 1).padStart(2, "0"),
+    String(date.getUTCDate()).padStart(2, "0"),
+  ].join("-");
+}
+
 function formatBsDate(bsDate) {
   return [
     bsDate.getYear(),
     String(bsDate.getMonth() + 1).padStart(2, "0"),
     String(bsDate.getDate()).padStart(2, "0"),
   ].join("-");
+}
+
+function getNepalDateAd(date = new Date()) {
+  return formatUtcDate(new Date(date.getTime() + NEPAL_OFFSET_MS));
 }
 
 function adToBs(adDateStr) {
@@ -42,9 +56,15 @@ function getBsYear(adDateStr) {
 }
 
 function todayBs() {
-  const now = new Date();
-  const adStr = formatAdDate(now);
-  return adToBs(adStr);
+  return adToBs(getNepalDateAd());
+}
+
+function attendanceDatesFromInstant(date = new Date()) {
+  const dateAd = getNepalDateAd(date);
+  return {
+    date_ad: dateAd,
+    date_bs: adToBs(dateAd),
+  };
 }
 
 function getDaysInBsMonth(year, month) {
@@ -55,4 +75,13 @@ function getDaysInBsMonth(year, month) {
   return Math.round((next.getTime() - start.getTime()) / 86400000);
 }
 
-module.exports = { adToBs, bsToAd, getBsYear, todayBs, getDaysInBsMonth };
+module.exports = {
+  adToBs,
+  bsToAd,
+  getBsYear,
+  todayBs,
+  getDaysInBsMonth,
+  getNepalDateAd,
+  attendanceDatesFromInstant,
+  NEPAL_OFFSET_MS,
+};
