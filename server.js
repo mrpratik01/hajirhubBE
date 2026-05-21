@@ -19,7 +19,7 @@ function validateEnvironment() {
   if (missing.length === 0) return;
 
   const message = `Missing required environment variables: ${missing.join(", ")}`;
-  if (process.env.NODE_ENV === "production") {
+  if (pros.env.NODE_ENV === "production") {
     console.error(`[Startup] ${message}`);
     process.exit(1);
   }
